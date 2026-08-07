@@ -1,0 +1,8 @@
+/target/
+references/cay/
+*.pdb
+*.ilk
+*.user
+.vs/
+.vscode/
+

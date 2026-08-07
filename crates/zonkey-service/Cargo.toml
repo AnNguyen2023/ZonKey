@@ -1,0 +1,16 @@
+[package]
+name = "zonkey-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zonkey-policy = { path = "../zonkey-policy" }
+zonkey-telex = { path = "../zonkey-telex" }
+zonkey-token = { path = "../zonkey-token" }
+zonkey-types = { path = "../zonkey-types" }
+
+[lints]
+workspace = true
+

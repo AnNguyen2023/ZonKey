@@ -1,0 +1,27 @@
+# Lowercase exact-match technical vocabulary.
+certificate
+cluster
+compiler
+config
+database
+dhcp
+dns
+endpoint
+firewall
+fqdn
+hostname
+iis
+kernel
+network
+openssl
+pki
+powershell
+rdp
+registry
+router
+service
+storage
+terminal
+virtual
+vlan
+xrdp

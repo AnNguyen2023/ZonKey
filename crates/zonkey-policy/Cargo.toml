@@ -1,0 +1,19 @@
+[package]
+name = "zonkey-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zonkey-detect = { path = "../zonkey-detect" }
+zonkey-token = { path = "../zonkey-token" }
+zonkey-types = { path = "../zonkey-types" }
+
+[dev-dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+zonkey-telex = { path = "../zonkey-telex" }
+
+[lints]
+workspace = true

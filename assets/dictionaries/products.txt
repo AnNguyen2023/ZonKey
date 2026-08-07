@@ -1,0 +1,9 @@
+# Lowercase product and platform names; input casing is preserved.
+esxi
+firefox
+fortigate
+pfsense
+redis
+tauri
+vcenter
+vmware

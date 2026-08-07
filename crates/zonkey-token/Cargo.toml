@@ -1,0 +1,13 @@
+[package]
+name = "zonkey-token"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+unicode-segmentation = "1.13.3"
+zonkey-types = { path = "../zonkey-types" }
+
+[lints]
+workspace = true

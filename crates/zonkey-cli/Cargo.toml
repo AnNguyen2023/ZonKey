@@ -1,0 +1,13 @@
+[package]
+name = "zonkey-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zonkey-service = { path = "../zonkey-service" }
+
+[lints]
+workspace = true
+

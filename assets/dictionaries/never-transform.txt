@@ -1,0 +1,13 @@
+# Documentation inventory for token structures recognized before dictionaries.
+url-or-uri
+email
+windows-or-unix-path
+unc-path
+domain-or-fqdn
+ipv4-or-ipv6
+command-option
+camel-pascal-snake-kebab-identifier
+semantic-version
+uuid
+hex-or-hash
+secret-like
