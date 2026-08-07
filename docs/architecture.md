@@ -42,6 +42,25 @@ zonkey-types`.
 
 Queueing, service lifecycle, overflow, and shutdown semantics are explicitly
 deferred to M3A-02. No runtime behavior is introduced by M3A-01.
+
+### M3A-02 bounded event pipeline
+
+M3A-02 implements only an in-memory mock pipeline in `zonkey-service`: a
+bounded FIFO queue and a synchronous service abstraction over mock event
+sources/processors. It is deterministic, platform-neutral, and non-runtime.
+The queue reports loss without reconstructing events; the service resets its
+processor boundary before the first event after a loss episode and drains
+accepted events on graceful stop. No component can observe real input or
+change user text, and no `EditPlan` is executed.
+
+The current synchronous service consumes a finite mock source into the bounded
+queue before draining it, so a source larger than capacity can exercise real
+queue/service overflow in tests. This is not a real producer/consumer runtime;
+that separation remains future work.
+
+The queue, service lifecycle, and processor contracts are documented in
+`docs/m3a-02-bounded-event-pipeline.md`. Windows mapping, a real hook,
+foreground context, diagnostics writing, and text editing remain deferred.
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
