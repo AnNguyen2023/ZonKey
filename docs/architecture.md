@@ -30,6 +30,18 @@ future hook callback
 The callback must forward input immediately; observation must never suppress,
 replay, inject, replace, or block user input. M3A adds no Windows dependency,
 FFI, hook, GUI, service, persistence, or diagnostics writer.
+
+### M3A-01 platform-neutral type boundary
+
+M3A-01 adds only validated observed-input value types to `zonkey-types`.
+They cannot observe input, start a thread, log text, or modify text. The types
+carry no native handles, virtual-key numbers, timestamps, token text, process
+identity, or window handles. `zonkey-win` remains the only future crate that
+may depend on Windows APIs, with the intended direction `zonkey-win ->
+zonkey-types`.
+
+Queueing, service lifecycle, overflow, and shutdown semantics are explicitly
+deferred to M3A-02. No runtime behavior is introduced by M3A-01.
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
