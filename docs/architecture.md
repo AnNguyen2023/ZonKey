@@ -8,6 +8,28 @@ M2 keeps lexical facts and recovery policy separate. Raw text, rendered text, bo
 zonkey-detect does not authorize edits. zonkey-policy does not load dictionaries or recognize token syntax. zonkey-token remains the only crate that computes grapheme-safe edits. Context is supplied explicitly by a future adapter; M2 does not inspect applications, windows, processes, secure desktops, or remote sessions.
 
 The dependency direction is acyclic: policy depends on detect, token, and types; detect depends only on types. Dictionary assets are embedded at compile time, so classification performs no filesystem or network access.
+
+## Future M3A observe-only boundary
+
+M3A is a reviewed design milestone, not a runtime implementation. The current
+codebase has no text-edit capability beyond returning abstract plans, and no
+crate acquires keyboard input or executes those plans. Platform-neutral event
+contracts will be introduced only in M3A-01 after the scope in
+`docs/m3a-observe-only-scope.md` and ADR 0003 are approved.
+
+The proposed future data flow is deliberately non-implemented:
+
+```text
+future hook callback
+  -> bounded loss-aware queue
+  -> future service loop
+  -> core detection/policy
+  -> aggregate/redacted diagnostics
+```
+
+The callback must forward input immediately; observation must never suppress,
+replay, inject, replace, or block user input. M3A adds no Windows dependency,
+FFI, hook, GUI, service, persistence, or diagnostics writer.
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
