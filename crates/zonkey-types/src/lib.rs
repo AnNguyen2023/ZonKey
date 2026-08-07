@@ -1,5 +1,13 @@
 //! Shared, platform-independent domain types.
 
+mod observe;
+
+pub use observe::{
+    ContextSnapshotError, EventSequence, EventSequenceError, ForegroundContextSnapshot,
+    InjectionOrigin, IntegrityRelation, KeyEventKind, ModifierKey, ModifierState,
+    ObservedInputEvent, ObservedKey, ObservedKeyError, ObserverError, ObserverStatus,
+};
+
 /// An explicit boundary that ends or invalidates the current token.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenBoundary {
