@@ -367,6 +367,36 @@ mod tests {
         }
     }
 
+    struct MockPlatformAdapter {
+        events: VecDeque<ObservedInputEvent>,
+    }
+
+    impl MockPlatformAdapter {
+        fn new(events: Vec<ObservedInputEvent>) -> Self {
+            Self {
+                events: events.into(),
+            }
+        }
+    }
+
+    impl EventSource for MockPlatformAdapter {
+        fn next_event(&mut self) -> Result<Option<ObservedInputEvent>, ObserverError> {
+            Ok(self.events.pop_front())
+        }
+    }
+
+    struct CountingFailingAdapter {
+        responses: VecDeque<Result<Option<ObservedInputEvent>, ObserverError>>,
+        polls: usize,
+    }
+
+    impl EventSource for CountingFailingAdapter {
+        fn next_event(&mut self) -> Result<Option<ObservedInputEvent>, ObserverError> {
+            self.polls += 1;
+            self.responses.pop_front().unwrap_or(Ok(None))
+        }
+    }
+
     #[derive(Default)]
     struct MockProcessor {
         processed: Vec<u64>,
@@ -407,6 +437,92 @@ mod tests {
         assert_eq!(report.received, 2);
         assert_eq!(report.accepted, 2);
         assert_eq!(report.processed, 2);
+    }
+
+    #[test]
+    fn mock_platform_adapter_feeds_validated_events_to_service_fifo() {
+        let mut adapter = MockPlatformAdapter::new(vec![event(7), event(8), event(9)]);
+        let mut processor = MockProcessor::default();
+        let mut service = ObserveService::new(ObserveQueue::new(3).unwrap());
+
+        let report = service.run(&mut adapter, &mut processor);
+
+        assert_eq!(report.received, 3);
+        assert_eq!(report.accepted, 3);
+        assert_eq!(report.dropped, 0);
+        assert_eq!(report.processed, 3);
+        assert_eq!(processor.processed, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn invalid_event_inputs_are_rejected_before_adapter_boundary() {
+        assert!(zonkey_types::ObservedKey::letter('é').is_err());
+        assert!(zonkey_types::EventSequence::new(0).is_err());
+    }
+
+    #[test]
+    fn source_failure_is_terminal_without_repoll_or_queue_drain() {
+        let mut adapter = CountingFailingAdapter {
+            responses: VecDeque::from([
+                Ok(Some(event(10))),
+                Ok(Some(event(11))),
+                Err(ObserverError::EventSourceClosed),
+                Ok(Some(event(12))),
+            ]),
+            polls: 0,
+        };
+        let mut processor = MockProcessor::default();
+        let mut service = ObserveService::new(ObserveQueue::new(4).unwrap());
+
+        let first_report = service.run(&mut adapter, &mut processor);
+        assert_eq!(adapter.polls, 3);
+        assert_eq!(service.status(), ObserverStatus::Failed);
+        assert_eq!(first_report.received, 2);
+        assert_eq!(first_report.accepted, 2);
+        assert_eq!(first_report.source_failures, 1);
+        assert_eq!(first_report.processed, 0);
+        assert_eq!(service.queue_stats().queued, 2);
+        assert!(processor.processed.is_empty());
+
+        let second_report = service.run(&mut adapter, &mut processor);
+        assert_eq!(adapter.polls, 3);
+        assert_eq!(service.status(), ObserverStatus::Failed);
+        assert_eq!(second_report, first_report);
+        assert_eq!(service.queue_stats().queued, 2);
+        assert!(processor.processed.is_empty());
+    }
+
+    #[test]
+    fn source_exhaustion_stops_after_fifo_drain_without_repoll() {
+        let mut adapter = CountingFailingAdapter {
+            responses: VecDeque::from([
+                Ok(Some(event(20))),
+                Ok(Some(event(21))),
+                Ok(None),
+                Ok(Some(event(22))),
+            ]),
+            polls: 0,
+        };
+        let mut processor = MockProcessor::default();
+        let mut service = ObserveService::new(ObserveQueue::new(4).unwrap());
+
+        let first_report = service.run(&mut adapter, &mut processor);
+        assert_eq!(adapter.polls, 3);
+        assert_eq!(service.status(), ObserverStatus::Stopped);
+        assert_eq!(first_report.received, 2);
+        assert_eq!(first_report.accepted, 2);
+        assert_eq!(first_report.processed, 2);
+        assert_eq!(first_report.dropped, 0);
+        assert_eq!(first_report.discontinuities, 0);
+        assert_eq!(processor.processed, vec![20, 21]);
+        assert_eq!(service.queue_stats().queued, 0);
+
+        let second_report = service.run(&mut adapter, &mut processor);
+        assert_eq!(adapter.polls, 3);
+        assert_eq!(service.status(), ObserverStatus::Stopped);
+        assert_eq!(second_report, first_report);
+        assert_eq!(processor.processed, vec![20, 21]);
+        assert_eq!(service.queue_stats().queued, 0);
     }
 
     #[test]

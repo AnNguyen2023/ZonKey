@@ -237,7 +237,12 @@ User dictionary phải nằm trong profile người dùng, không commit vào Gi
 
 ## 9. Delivery milestones
 
-### M0 — Audit & specification (1 tuần)
+Status labels below describe the repository state at the time of this
+documentation sync: DONE, IN PROGRESS, PLANNED, or DEFERRED. The roadmap and
+design intent remain unchanged; completed milestones are called out so that
+future Windows runtime work is not mistaken for an existing implementation.
+
+### M0 — Audit & specification (1 tuần) — DONE
 
 - Clone Cay as read-only upstream reference.
 - Hoàn tất `docs/cay-audit.md`.
@@ -246,31 +251,67 @@ User dictionary phải nằm trong profile người dùng, không commit vào Gi
 
 **Exit:** specs, test corpus và licensing decision được review.
 
-### M1 — Pure Rust engine (2–3 tuần)
+### M1 — Pure Rust engine (2–3 tuần) — DONE
 
 - `zonkey-types`, `zonkey-token`, `zonkey-telex`.
 - Deterministic Telex behavior và golden tests.
-- Chưa có hook/UI.
+- Chưa có hook/UI; this remains outside the completed milestone.
 
 **Exit:** corpus Telex chạy green trên Windows CI.
 
-### M2 — Recovery engine (2 tuần)
+### M2 — Recovery engine (2 tuần) — DONE
 
 - `zonkey-detect`, dictionaries, policy engine.
-- Observe-only CLI replay corpus.
+- Detection, dictionaries, policy engine, and corpus coverage are implemented.
+- Observe-only CLI replay remains PLANNED; the current CLI is not a runtime
+  observer.
 - Metrics local: false positive/false negative trong test corpus.
 
 **Exit:** không auto-restore ca Vietnamese hợp lệ trong negative corpus quan trọng.
 
-### M3 — Windows prototype (2–3 tuần)
+### M3A — Observe-only foundation
+
+#### M3A-01 — Observed event contracts — DONE
+
+- Validated, platform-neutral observed-input value types live in
+  `zonkey-types`.
+- These contracts do not observe input, expose native values, or modify text.
+
+#### M3A-02 — Bounded observe-only mock pipeline — DONE
+
+- `zonkey-service` provides the deterministic bounded queue and synchronous
+  mock `EventSource`/processor pipeline.
+- Overflow is loss-aware and aggregate-only; accepted events are drained
+  FIFO. No runtime input observation or text editing exists.
+
+#### M3A-03 — Observe adapter boundary contract — DONE
+
+- See `docs/adr/0004-m3a03-observe-adapter-boundary.md`. The platform-neutral
+  contract and its public-API evidence are complete; this does not imply a
+  Windows observer or input editing.
+
+#### M3A-04 — Windows observe-source spike — PLANNED
+
+- Smallest next boundary: evaluate one Windows-side event-source mapping into
+  the existing validated `ObservedInputEvent` contract and observe-only
+  pipeline.
+- Scope is roadmap-only until separately specified and approved. No
+  suppression, injection, replay, text editing, or foreground inspection is
+  implied.
+
+### M3 — Windows prototype (2–3 tuần) — PLANNED
 
 - `zonkey-win` với low-level hook và safe event filtering.
 - Notepad/browser test; edit plan + undo.
 - Observe-only và manual enable flag.
 
+Windows runtime observation, hooks, and injection are not implemented in the
+current repository. `zonkey-win` remains a validation placeholder; any input
+modification/injection is deferred to a separately approved future scope.
+
 **Exit:** không key stuck, không loop injected event, không mất text ở test matrix cơ bản.
 
-### M4 — Usable desktop build (2 tuần)
+### M4 — Usable desktop build (2 tuần) — PLANNED
 
 - Tray, config, per-app profile, dictionary management CLI.
 - Installer/portable package, logging opt-in, crash reporting local.
@@ -278,7 +319,7 @@ User dictionary phải nằm trong profile người dùng, không commit vào Gi
 
 **Exit:** daily-driver pilot trên 1–3 máy trong 2 tuần.
 
-### M5 — Hardening (liên tục)
+### M5 — Hardening (liên tục) — DEFERRED
 
 - Regression corpus từ các correction bị undo.
 - RDP, UWP, Office, Chromium, terminal compatibility.
