@@ -210,7 +210,9 @@ User dictionary phải nằm trong profile người dùng, không commit vào Gi
 
 - Telex: dấu, `dd`, `aw`, `aa`, `ee`, `oo`, `ow`, `uw`, tone placement, undo by repeated key.
 - Buffer: whitespace, punctuation, cursor movement, selection, backspace, focus loss.
-- Recovery: `resume → résume → resume`, `pull → pũll → pull`, cases mơ hồ và Vietnamese hợp lệ.
+- Recovery: transformed `resume` evidence; unchanged tokens such as `pull` do
+  not become recovery candidates from dictionary membership alone. Ambiguous
+  and valid Vietnamese cases remain conservative.
 - Pattern: URL, path, IP, FQDN, e-mail, semantic version, UUID, hash, command flag.
 - Config: migration, malformed config, atomic save, default recovery.
 

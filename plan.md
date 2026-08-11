@@ -413,13 +413,16 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
 - Owner decided to activate none of the 14 records; the set is historical/
   stale backlog pending corpus hygiene.
 
-#### M3B-07 - Planned corpus hygiene - PLANNED
+#### M3B-07 - Planned corpus hygiene - DONE
 
 - Documentation/corpus-maintenance decision only: determine whether obsolete
   or redundant planned records should be removed, archived, or rewritten when
   they still represent approved product intent.
 - Do not activate redundant records and do not change detector, policy, or
   Telex semantics.
+- Owner-approved disposition removed all 14 audited records from the planned
+  corpus: active remains 356 and planned is now 55. See
+  `docs/m3b-07-planned-corpus-hygiene.md`.
 
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.

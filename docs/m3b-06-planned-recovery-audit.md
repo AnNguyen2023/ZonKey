@@ -1,7 +1,9 @@
 # M3B-06 planned transformed-recovery fixture audit
 
-Status: DONE. No planned fixture was activated, edited, deleted, or
-rewritten. The current recovery invariant remains:
+Status: DONE. No record was activated, edited, deleted, or rewritten during
+M3B-06. M3B-07 later removed all 14 audited records from the
+executable planned corpus without changing their audit evidence. The current
+recovery invariant remains:
 
 ```text
 raw == rendered -> dictionary membership alone yields no recovery evidence
