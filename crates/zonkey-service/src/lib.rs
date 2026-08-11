@@ -315,6 +315,35 @@ pub enum DiagnosticDecision {
     Unsupported,
 }
 
+/// A bounded, platform-neutral description of a restore that would be
+/// appropriate for one completed token. It is data only: no execution API is
+/// provided and `execution_allowed` is permanently false.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestorePlan {
+    /// The intended token reconstructed from the raw token state.
+    pub original_token: String,
+    /// The token currently rendered by Telex.
+    pub rendered_token: String,
+    /// The replacement text that simulation would use.
+    pub replacement_token: String,
+    /// Number of Unicode scalar values in the rendered token.
+    pub rendered_units_to_replace: usize,
+    /// Number of Unicode scalar values in the replacement token.
+    pub replacement_units: usize,
+    /// Existing policy evidence that justified the candidate.
+    pub reason: zonkey_types::DecisionReason,
+    /// Always false; execution belongs to a separately approved milestone.
+    execution_allowed: bool,
+}
+
+impl RestorePlan {
+    /// Returns false for every plan; M3C-01 has no execution capability.
+    #[must_use]
+    pub const fn execution_allowed(&self) -> bool {
+        self.execution_allowed
+    }
+}
+
 /// Stateful, observe-only bridge from validated events to M1/M2 decisions.
 ///
 /// This processor reports only sanitized decision categories. It never
@@ -335,6 +364,7 @@ pub struct DiagnosticDecisionProcessor {
     meta_down: bool,
     last_token_lengths: Option<(usize, usize)>,
     last_decision: Option<DiagnosticDecision>,
+    last_restore_plan: Option<RestorePlan>,
 }
 
 impl DiagnosticDecisionProcessor {
@@ -356,6 +386,7 @@ impl DiagnosticDecisionProcessor {
             meta_down: false,
             last_token_lengths: None,
             last_decision: None,
+            last_restore_plan: None,
         }
     }
 
@@ -387,6 +418,13 @@ impl DiagnosticDecisionProcessor {
     #[must_use]
     pub const fn last_token_lengths(&self) -> Option<(usize, usize)> {
         self.last_token_lengths
+    }
+
+    /// Returns the latest bounded simulation plan, if the last completed
+    /// token produced a restore candidate.
+    #[must_use]
+    pub fn last_restore_plan(&self) -> Option<&RestorePlan> {
+        self.last_restore_plan.as_ref()
     }
 
     fn reset_token(&mut self) {
@@ -425,6 +463,7 @@ impl DiagnosticDecisionProcessor {
     fn evaluate_boundary(&mut self, boundary: TokenBoundary) -> ProcessorClassification {
         let raw = self.telex.token().raw_ascii.clone();
         let rendered = self.telex.token().rendered.clone();
+        self.last_restore_plan = None;
         if raw.is_empty() && rendered.is_empty() {
             let _ = self.telex.process(EngineEvent::Boundary(boundary));
             return ProcessorClassification::BoundaryObserved;
@@ -440,7 +479,16 @@ impl DiagnosticDecisionProcessor {
             .policy
             .decide(evidence.clone(), self.context, &rendered);
         let decision = match outcome.decision {
-            zonkey_types::RecoveryDecision::RestoreEnglish { .. } => {
+            zonkey_types::RecoveryDecision::RestoreEnglish { text, reason, .. } => {
+                self.last_restore_plan = Some(RestorePlan {
+                    original_token: raw.clone(),
+                    rendered_token: rendered.clone(),
+                    replacement_token: text.clone(),
+                    rendered_units_to_replace: rendered.chars().count(),
+                    replacement_units: text.chars().count(),
+                    reason,
+                    execution_allowed: false,
+                });
                 DiagnosticDecision::RestoreCandidate
             }
             zonkey_types::RecoveryDecision::Ambiguous { .. } => DiagnosticDecision::Ambiguous,
@@ -463,6 +511,25 @@ impl DiagnosticDecisionProcessor {
                 rendered.len()
             );
         }
+        if decision == DiagnosticDecision::RestoreCandidate {
+            let plan = self
+                .last_restore_plan
+                .as_ref()
+                .expect("restore candidate always has a simulation plan");
+            if self.show_token {
+                println!(
+                    "restore_plan=yes rendered={:?} replacement={:?}",
+                    plan.rendered_token, plan.replacement_token
+                );
+            } else {
+                println!(
+                    "restore_plan=yes replace_len={} replacement_len={}",
+                    plan.rendered_units_to_replace, plan.replacement_units
+                );
+            }
+        } else {
+            println!("restore_plan=no");
+        }
         let _ = self.telex.process(EngineEvent::Boundary(boundary));
         ProcessorClassification::BoundaryObserved
     }
@@ -477,6 +544,7 @@ impl Default for DiagnosticDecisionProcessor {
 impl EventProcessor for DiagnosticDecisionProcessor {
     fn reset_after_discontinuity(&mut self) {
         self.reset_token();
+        self.last_restore_plan = None;
         self.control_down = false;
         self.alt_down = false;
         self.meta_down = false;
@@ -513,6 +581,7 @@ impl EventProcessor for DiagnosticDecisionProcessor {
         }
         if event.key.is_escape() {
             self.reset_token();
+            self.last_restore_plan = None;
             return ProcessorClassification::Ignored;
         }
         if event.key.is_backspace() {
@@ -541,6 +610,7 @@ impl EventProcessor for DiagnosticDecisionProcessor {
             .ok_or(());
         let Ok(character) = character else {
             self.reset_token();
+            self.last_restore_plan = None;
             return ProcessorClassification::Unsupported;
         };
         if self
@@ -551,6 +621,7 @@ impl EventProcessor for DiagnosticDecisionProcessor {
             ProcessorClassification::Observed
         } else {
             self.reset_token();
+            self.last_restore_plan = None;
             ProcessorClassification::Unsupported
         }
     }
@@ -943,6 +1014,13 @@ mod tests {
             processor.last_decision(),
             Some(DiagnosticDecision::RestoreCandidate)
         );
+        let plan = processor
+            .last_restore_plan()
+            .expect("restore candidate has a simulation plan");
+        assert_eq!(plan.original_token, "resume");
+        assert_eq!(plan.replacement_token, "resume");
+        assert!(!plan.rendered_token.is_empty());
+        assert!(!plan.execution_allowed());
 
         for character in "dungf".chars() {
             let key = ObservedKey::letter(character).expect("ASCII letter");
@@ -963,6 +1041,100 @@ mod tests {
             zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
         ));
         assert_eq!(processor.completed_tokens(), 2);
+        assert_eq!(processor.last_restore_plan(), None);
+    }
+
+    #[test]
+    fn diagnostic_restore_plan_is_only_for_restore_candidates() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+
+        for (sequence, character) in [(1, 'd'), (2, 'u'), (3, 'n'), (4, 'g'), (5, 'f')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            6,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.last_decision(), Some(DiagnosticDecision::Keep));
+        assert_eq!(processor.last_restore_plan(), None);
+
+        for (sequence, character) in [(7, 'h'), (8, 'e'), (9, 'l'), (10, 'l'), (11, 'o')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            12,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(
+            processor.last_decision(),
+            Some(DiagnosticDecision::Ambiguous)
+        );
+        assert_eq!(processor.last_restore_plan(), None);
+
+        assert_eq!(
+            processor.process(&key_event(
+                13,
+                ObservedKey::other(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            )),
+            ProcessorClassification::Unsupported
+        );
+        assert_eq!(processor.last_restore_plan(), None);
+
+        processor.process(&key_event(
+            14,
+            ObservedKey::enter(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.last_restore_plan(), None);
+    }
+
+    #[test]
+    fn discontinuity_clears_restore_plan() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert!(processor.last_restore_plan().is_some());
+        processor.reset_after_discontinuity();
+        assert_eq!(processor.last_restore_plan(), None);
     }
 
     #[test]

@@ -432,6 +432,20 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
 - No detector, policy, Telex, dictionary, or fixture changes are justified.
 - See `docs/m3b-08-transformed-ambiguity-review.md`.
 
+#### M3C-01 - Restore simulation boundary - DONE
+
+- Convert an approved `RestoreCandidate` into a deterministic, inspectable
+  platform-neutral `RestorePlan`; never execute it or modify user text.
+- Keep logical Unicode-scalar span counts and bounded latest-plan lifetime.
+- No Windows editing, foreground inspection, clipboard, replay, suppression,
+  or other execution mechanism; any execution requires a separate approved
+  milestone. See ADR 0009.
+- Owner manual validation: `resume` produced `replace_len=5` and
+  `replacement_len=6`; `dungf` reported Keep with no plan; `hello` reported
+  Ambiguous with no plan. Runtime counters were received=16, accepted=16,
+  dropped=0, processed=16, discontinuities=0, source_failures=0,
+  unsupported_events=0.
+
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
 

@@ -260,6 +260,19 @@ that policy requires technical-grade evidence; zero eligible writing-context
 ambiguity cases were found. No behavior, corpus, detector, policy, or Telex
 change is justified.
 
+### M3C-01 restore simulation boundary - DONE
+
+`zonkey-service` now exposes a bounded `RestorePlan` only when the existing
+policy returns `RestoreCandidate`. It records logical Unicode-scalar lengths,
+replacement data, and evidence while permanently remaining simulation-only;
+Keep, Ambiguous, Unsupported, empty, injected, and discontinuity paths do not
+produce an executable plan. The CLI may show sanitized plan metadata, with
+token values limited to the existing `--show-token` diagnostic mode. No
+Windows editing or foreground inspection is part of this milestone.
+Owner manual validation confirmed `resume` simulation with
+`replace_len=5`/`replacement_len=6`, while `dungf` produced Keep/no plan and
+`hello` produced Ambiguous/no plan. No text modification occurred.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
