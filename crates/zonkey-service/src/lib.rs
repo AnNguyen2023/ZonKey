@@ -344,6 +344,46 @@ impl RestorePlan {
     }
 }
 
+/// Fail-closed result for simulation eligibility, never OS editability.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanEligibility {
+    /// The current plan is internally consistent and may be considered by a
+    /// separately approved future execution boundary.
+    EligibleForFutureExecutionConsideration,
+    /// No current plan or an internal invariant is not satisfied.
+    Ineligible(PlanIneligibilityReason),
+}
+
+/// Reasons observable by the platform-neutral simulation layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlanIneligibilityReason {
+    /// The processor does not currently hold a plan.
+    NoCurrentPlan,
+    /// Stored logical lengths do not match the stored token values.
+    InternalSpanInconsistent,
+    /// The plan is not marked as simulation-only.
+    ExecutionCapabilityPresent,
+}
+
+/// Validates one optional plan without I/O, mutation, or policy reruns.
+#[must_use]
+pub fn validate_restore_plan(plan: Option<&RestorePlan>) -> PlanEligibility {
+    let Some(plan) = plan else {
+        return PlanEligibility::Ineligible(PlanIneligibilityReason::NoCurrentPlan);
+    };
+    if plan.execution_allowed() {
+        return PlanEligibility::Ineligible(PlanIneligibilityReason::ExecutionCapabilityPresent);
+    }
+    if plan.original_token.is_empty()
+        || plan.replacement_token.is_empty()
+        || plan.rendered_units_to_replace != plan.rendered_token.chars().count()
+        || plan.replacement_units != plan.replacement_token.chars().count()
+    {
+        return PlanEligibility::Ineligible(PlanIneligibilityReason::InternalSpanInconsistent);
+    }
+    PlanEligibility::EligibleForFutureExecutionConsideration
+}
+
 /// Stateful, observe-only bridge from validated events to M1/M2 decisions.
 ///
 /// This processor reports only sanitized decision categories. It never
@@ -425,6 +465,12 @@ impl DiagnosticDecisionProcessor {
     #[must_use]
     pub fn last_restore_plan(&self) -> Option<&RestorePlan> {
         self.last_restore_plan.as_ref()
+    }
+
+    /// Validates the current plan using only processor-owned state.
+    #[must_use]
+    pub fn plan_eligibility(&self) -> PlanEligibility {
+        validate_restore_plan(self.last_restore_plan())
     }
 
     fn reset_token(&mut self) {
@@ -520,6 +566,7 @@ impl DiagnosticDecisionProcessor {
                 .last_restore_plan
                 .as_ref()
                 .expect("restore candidate always has a simulation plan");
+            println!("restore_plan=yes eligibility=simulation-current");
             if self.show_token {
                 println!(
                     "restore_plan=yes rendered={:?} replacement={:?}",
@@ -532,7 +579,7 @@ impl DiagnosticDecisionProcessor {
                 );
             }
         } else {
-            println!("restore_plan=no");
+            println!("restore_plan=no eligibility=no-plan");
         }
         let _ = self.telex.process(EngineEvent::Boundary(boundary));
         ProcessorClassification::BoundaryObserved
@@ -1027,6 +1074,10 @@ mod tests {
         assert_eq!(plan.replacement_token, "resume");
         assert!(!plan.rendered_token.is_empty());
         assert!(!plan.execution_allowed());
+        assert_eq!(
+            processor.plan_eligibility(),
+            PlanEligibility::EligibleForFutureExecutionConsideration
+        );
 
         for character in "dungf".chars() {
             let key = ObservedKey::letter(character).expect("ASCII letter");
@@ -1048,12 +1099,20 @@ mod tests {
         ));
         assert_eq!(processor.completed_tokens(), 2);
         assert_eq!(processor.last_restore_plan(), None);
+        assert_eq!(
+            processor.plan_eligibility(),
+            PlanEligibility::Ineligible(PlanIneligibilityReason::NoCurrentPlan)
+        );
     }
 
     #[test]
     fn diagnostic_restore_plan_is_only_for_restore_candidates() {
         let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
         let mut processor = DiagnosticDecisionProcessor::default();
+        assert_eq!(
+            processor.plan_eligibility(),
+            PlanEligibility::Ineligible(PlanIneligibilityReason::NoCurrentPlan)
+        );
 
         for (sequence, character) in [(1, 'd'), (2, 'u'), (3, 'n'), (4, 'g'), (5, 'f')] {
             processor.process(&key_event(
@@ -1141,6 +1200,38 @@ mod tests {
         assert!(processor.last_restore_plan().is_some());
         processor.reset_after_discontinuity();
         assert_eq!(processor.last_restore_plan(), None);
+        assert_eq!(
+            processor.plan_eligibility(),
+            PlanEligibility::Ineligible(PlanIneligibilityReason::NoCurrentPlan)
+        );
+    }
+
+    #[test]
+    fn validator_rejects_inconsistent_internal_span() {
+        let mut processor = DiagnosticDecisionProcessor::default();
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        let mut malformed = processor.last_restore_plan().unwrap().clone();
+        malformed.rendered_token.push('x');
+        assert_eq!(
+            validate_restore_plan(Some(&malformed)),
+            PlanEligibility::Ineligible(PlanIneligibilityReason::InternalSpanInconsistent)
+        );
     }
 
     #[test]

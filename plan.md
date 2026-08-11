@@ -459,6 +459,18 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
   counters were received=56, accepted=56, dropped=0, processed=56,
   discontinuities=0, source_failures=0, unsupported_events=0.
 
+#### M3C-03 - Restore-plan precondition model - DONE
+
+- Add fail-closed, read-only eligibility metadata for a current simulation
+  plan; this never means executable or safe to edit.
+- Validate only plan presence, simulation-only state, and internal scalar
+  span consistency. Do not rerun policy or claim foreground/editor state is
+  known. See ADR 0011.
+- Owner manual validation confirmed `resume` eligibility, and no-plan
+  results for `hello` (Ambiguous) and `dungf` (Keep). Runtime counters were
+  received=40, accepted=40, dropped=0, processed=40, discontinuities=0,
+  source_failures=0, unsupported_events=0.
+
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
 

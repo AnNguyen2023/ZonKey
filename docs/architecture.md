@@ -287,6 +287,21 @@ new RestoreCandidate plan. Runtime counters were received=56, accepted=56,
 dropped=0, processed=56, discontinuities=0, source_failures=0,
 unsupported_events=0. No text modification occurred.
 
+### M3C-03 restore-plan precondition model - DONE
+
+`zonkey-service` provides fail-closed `PlanEligibility` validation for the
+current in-memory plan. It checks presence, simulation-only execution state,
+and internal Unicode-scalar span consistency without rerunning policy. The
+result means only eligible for future execution consideration; foreground
+contents, caret, selection, focus, window/process, IME, secure-field, and race
+conditions remain unknown and out of scope.
+Owner manual validation confirmed `resume` as
+`eligibility=simulation-current` with `replace_len=5` and
+`replacement_len=6`; `hello` and `dungf` both reported
+`eligibility=no-plan`. Runtime counters were received=40, accepted=40,
+dropped=0, processed=40, discontinuities=0, source_failures=0,
+unsupported_events=0. No text modification occurred.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
