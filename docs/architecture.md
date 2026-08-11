@@ -252,6 +252,14 @@ the planned set was historical/stale backlog and M3B-07 removed it from the
 executable planned corpus. Active remains 356, planned is now 55. No runtime
 behavior changes.
 
+### M3B-08 transformed ambiguity review - IN REVIEW
+
+The review inventory found five transformed `Ambiguous` cases, all in the
+technical-editor context. They are expected conservative outcomes because
+that policy requires technical-grade evidence; zero eligible writing-context
+ambiguity cases were found. No behavior, corpus, detector, policy, or Telex
+change is justified.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
