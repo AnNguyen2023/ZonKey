@@ -245,8 +245,11 @@ specifically a planned fixture requiring audit because current Telex evidence
 does not show a mutation. No detector, policy, Telex, dictionary, threshold,
 or runtime behavior changes in this review.
 
-M3B-06 is planned to audit all 14 planned transformed records individually
-before any fixture activation.
+M3B-06 audited all 14 planned transformed records individually. None is ready
+for activation: 13 duplicate active coverage and `pull` conflicts with the
+unchanged-token recovery invariant. The owner decision is to activate none;
+the planned set is historical/stale backlog pending M3B-07 corpus hygiene.
+No runtime behavior changes.
 
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.

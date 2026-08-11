@@ -402,12 +402,24 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
 - Planned recovery-labelled records, including `pull`, are not treated as
   activation evidence until individually audited.
 
-#### M3B-06 - Planned transformed-recovery fixture audit - PLANNED
+#### M3B-06 - Planned transformed-recovery fixture audit - DONE
 
 - Audit all 14 planned transformed records as valid transformation,
   unchanged-token, already-covered, outdated expectation, or unclear.
 - Do not activate or modify fixtures until owner review; no detector or policy
   tuning is in scope.
+- See `docs/m3b-06-planned-recovery-audit.md` for the complete row-by-row
+  evidence table and readiness decision.
+- Owner decided to activate none of the 14 records; the set is historical/
+  stale backlog pending corpus hygiene.
+
+#### M3B-07 - Planned corpus hygiene - PLANNED
+
+- Documentation/corpus-maintenance decision only: determine whether obsolete
+  or redundant planned records should be removed, archived, or rewritten when
+  they still represent approved product intent.
+- Do not activate redundant records and do not change detector, policy, or
+  Telex semantics.
 
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
