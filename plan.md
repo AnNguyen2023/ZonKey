@@ -290,13 +290,16 @@ future Windows runtime work is not mistaken for an existing implementation.
   contract and its public-API evidence are complete; this does not imply a
   Windows observer or input editing.
 
-#### M3A-04 — Windows observe-source spike — PLANNED
+#### M3A-04 — Windows observe-source spike — DONE
 
-- Smallest next boundary: evaluate one Windows-side event-source mapping into
-  the existing validated `ObservedInputEvent` contract and observe-only
-  pipeline.
-- Scope is roadmap-only until separately specified and approved. No
-  suppression, injection, replay, text editing, or foreground inspection is
+- ADR 0005 selects `WH_KEYBOARD_LL` for the first spike. The Windows-only
+  runnable observer, bounded wake-message bridge, native mapping tests, and
+  owner manual acceptance are complete.
+- Manual evidence: `Shift+A` and `Ctrl+C` reached the service with matching
+  modifier metadata; 49 callbacks, mappings, accepted and processed events;
+  zero mapping rejects, bridge drops, lock drops, or service drops. The
+  focused application continued receiving input normally.
+- No suppression, injection, replay, text editing, or foreground inspection is
   implied.
 
 ### M3 — Windows prototype (2–3 tuần) — PLANNED
@@ -305,9 +308,8 @@ future Windows runtime work is not mistaken for an existing implementation.
 - Notepad/browser test; edit plan + undo.
 - Observe-only và manual enable flag.
 
-Windows runtime observation, hooks, and injection are not implemented in the
-current repository. `zonkey-win` remains a validation placeholder; any input
-modification/injection is deferred to a separately approved future scope.
+The M3A-04 observe-source spike is present, but production Windows runtime
+observation, input modification, and injection remain out of scope.
 
 **Exit:** không key stuck, không loop injected event, không mất text ở test matrix cơ bản.
 

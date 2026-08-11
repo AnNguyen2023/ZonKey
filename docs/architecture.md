@@ -38,9 +38,9 @@ FFI, hook, GUI, service, persistence, or diagnostics writer.
 M3A-01 adds only validated observed-input value types to `zonkey-types`.
 They cannot observe input, start a thread, log text, or modify text. The types
 carry no native handles, virtual-key numbers, timestamps, token text, process
-identity, or window handles. `zonkey-win` remains the only future crate that
-may depend on Windows APIs, with the intended direction `zonkey-win ->
-zonkey-types`.
+identity, or window handles. `zonkey-win` is the only crate permitted to
+depend on Windows APIs; its spike boundary hands events toward
+`zonkey-service` and `zonkey-types`.
 
 The contracts introduce no runtime behavior. Queueing, service lifecycle,
 overflow, and shutdown semantics are implemented separately by M3A-02.
@@ -88,10 +88,32 @@ service, FIFO ownership and immutable processor input are preserved, overflow
 and discontinuity are observable, and stop, exhaustion, and source-failure
 terminal behavior are deterministic. No Windows observer is implemented.
 
-The next roadmap boundary is M3A-04, a separately approved Windows
-observe-source spike. Its scope is limited to mapping a platform event source
-to existing validated contracts; suppression, injection, replay, text editing,
-and foreground inspection remain out of scope.
+M3A-04 is the completed Windows observe-source spike. ADR 0005 selected
+`WH_KEYBOARD_LL`; the repository contains the Windows-only runnable observer,
+bounded wake-message bridge, native-to-domain mapping tests, and owner manual
+acceptance. Suppression, injection, replay, text editing, and foreground
+inspection remain out of scope.
+
+### M3A-04 implementation status — DONE
+
+`zonkey-win` contains the Windows-only hook boundary, bounded non-blocking
+bridge, modifier/injection mapping, and clean Ctrl+C shutdown path. The CLI
+entry point is `cargo run -p zonkey-cli -- observe`. The callback only copies
+minimal metadata, attempts the bounded handoff, chains `CallNextHookEx`, and
+returns; the service processor prints sanitized aggregate event metadata after
+drain. Manual acceptance covered modifier mapping and transparent focused-app
+input: 49 callbacks/mappings/processed events with no drops. Raw Input remains
+eligible for later production evaluation.
+
+This is a validated spike, not a final production architecture. Diagnostics
+are spike-only; mapping is intentionally incomplete and unsupported keys use
+`ObservedKey::other`; there is no Unicode reconstruction, foreground/context
+inspection, production IME behavior, injection, or editing. `WH_KEYBOARD_LL`
+is not permanently selected for the final runtime.
+
+The native boundary is isolated to `zonkey-win`; core crates remain
+platform-neutral. Automated checks do not replace the owner manual test; that
+M3A-04 acceptance has now passed.
 
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
@@ -109,7 +131,8 @@ zonkey-service → zonkey-policy → zonkey-detect → zonkey-types
    ↑
 zonkey-cli
 
-zonkey-win → zonkey-types       (placeholder M0, không đổi trong M1)
+zonkey-win → zonkey-service    (observe spike orchestration)
+          → zonkey-types       (Windows boundary; native code cfg(windows))
 ```
 
 - `zonkey-types`: event, boundary, action, unsupported result và `EditPlan`.
@@ -117,8 +140,10 @@ zonkey-win → zonkey-types       (placeholder M0, không đổi trong M1)
 - `zonkey-telex`: state machine deterministic; chỉ phụ thuộc token/types.
 - `zonkey-detect` và `zonkey-policy`: M2 implementation đã hoàn tất; vẫn
   platform-neutral và không thực thi edit.
-- `zonkey-win`: vẫn chỉ validate placeholder plan; chưa có hook/injection.
-- `zonkey-cli`: vẫn là stub, chưa phải runtime observer hay replay command.
+- `zonkey-win`: Windows observe-only spike boundary; native code is
+  `cfg(windows)`-gated and does not inject or suppress input.
+- `zonkey-cli`: có command `observe` cho M3A-04 manual spike; chưa là
+  production IME hoặc replay runtime.
 
 Core không phụ thuộc Win32, GUI, clock, locale, network hoặc filesystem. Serde và
 serde_json chỉ là dev-dependency của test runner corpus.

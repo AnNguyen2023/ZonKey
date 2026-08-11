@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 zonkey-service = { path = "../zonkey-service" }
+zonkey-win = { path = "../zonkey-win" }
 
 [lints]
 workspace = true
-
