@@ -34,6 +34,19 @@ pub struct NativeKeyboardEvent {
     pub sequence: u64,
 }
 
+/// Minimal metadata copied from a Raw Input keyboard packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawKeyboardEvent {
+    /// Virtual-key value from the raw keyboard packet.
+    pub virtual_key: u32,
+    /// Raw make/break flags.
+    pub flags: u32,
+    /// Keyboard message supplied by Windows.
+    pub message: u32,
+    /// Monotonic sequence assigned by the raw adapter.
+    pub sequence: u64,
+}
+
 pub(crate) const fn is_supported_message(message: u32) -> bool {
     matches!(message, 0x0100 | 0x0101 | 0x0104 | 0x0105)
 }
@@ -126,6 +139,23 @@ pub fn map_native_event(
     ))
 }
 
+/// Maps Raw Input metadata through the same neutral mapper as the hook spike.
+#[must_use]
+pub fn map_raw_event(
+    native: RawKeyboardEvent,
+    tracker: ModifierTracker,
+) -> Option<(ObservedInputEvent, ModifierTracker)> {
+    map_native_event(
+        NativeKeyboardEvent {
+            message: native.message,
+            virtual_key: native.virtual_key,
+            flags: 0,
+            sequence: native.sequence,
+        },
+        tracker,
+    )
+}
+
 fn map_key(virtual_key: u32) -> Option<ObservedKey> {
     match virtual_key {
         0x41..=0x5a => ObservedKey::letter(char::from_u32(virtual_key)?).ok(),
@@ -145,6 +175,8 @@ fn map_key(virtual_key: u32) -> Option<ObservedKey> {
 
 #[cfg(windows)]
 mod native;
+#[cfg(windows)]
+mod raw;
 
 /// Runs the Windows observe-only manual spike.
 ///
@@ -157,6 +189,16 @@ pub fn run_observe() -> Result<(), &'static str> {
     native::run_observe()
 }
 
+/// Runs the Windows observe-only Raw Input comparison spike.
+///
+/// # Errors
+///
+/// Returns a sanitized startup or observer failure.
+#[cfg(windows)]
+pub fn run_observe_raw() -> Result<(), &'static str> {
+    raw::run_observe_raw()
+}
+
 /// Windows observation is unavailable on non-Windows hosts.
 ///
 /// # Errors
@@ -167,9 +209,18 @@ pub fn run_observe() -> Result<(), &'static str> {
     Err("Windows observe-only spike requires a Windows host")
 }
 
+/// Raw Input observation is unavailable on non-Windows hosts.
+#[cfg(not(windows))]
+pub fn run_observe_raw() -> Result<(), &'static str> {
+    Err("Raw Input spike requires a Windows host")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ModifierTracker, NativeKeyboardEvent, map_native_event, validate_plan};
+    use super::{
+        ModifierTracker, NativeKeyboardEvent, RawKeyboardEvent, map_native_event, map_raw_event,
+        validate_plan,
+    };
     use zonkey_types::EditPlan;
 
     #[test]
@@ -443,5 +494,59 @@ mod tests {
                 .is_some()
             );
         }
+    }
+
+    #[test]
+    fn maps_raw_input_make_break_and_modifier_metadata() {
+        let (shift, tracker) = map_raw_event(
+            RawKeyboardEvent {
+                virtual_key: 0xa0,
+                flags: 0,
+                message: 0x0100,
+                sequence: 1,
+            },
+            ModifierTracker::default(),
+        )
+        .unwrap();
+        let (letter, tracker) = map_raw_event(
+            RawKeyboardEvent {
+                virtual_key: 0x41,
+                flags: 0,
+                message: 0x0100,
+                sequence: 2,
+            },
+            tracker,
+        )
+        .unwrap();
+        let (release, _) = map_raw_event(
+            RawKeyboardEvent {
+                virtual_key: 0xa0,
+                flags: 1,
+                message: 0x0101,
+                sequence: 3,
+            },
+            tracker,
+        )
+        .unwrap();
+        assert!(shift.modifiers.shift());
+        assert!(letter.modifiers.shift());
+        assert!(!release.modifiers.shift());
+    }
+
+    #[test]
+    fn raw_input_unsupported_key_is_still_a_valid_other_event() {
+        let (event, _) = map_raw_event(
+            RawKeyboardEvent {
+                virtual_key: 0xff,
+                flags: 0,
+                message: 0x0100,
+                sequence: 1,
+            },
+            ModifierTracker::default(),
+        )
+        .unwrap();
+        assert!(event.key.letter_value().is_none());
+        assert!(event.key.digit_value().is_none());
+        assert_eq!(event.sequence.get(), 1);
     }
 }

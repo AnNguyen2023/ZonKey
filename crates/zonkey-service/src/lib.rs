@@ -215,7 +215,8 @@ impl ObserveService {
         }
     }
 
-    /// Runs a finite mock source synchronously and drains accepted events.
+    /// Runs a source synchronously, processing one queued event after each
+    /// source event and draining accepted events at terminal shutdown.
     ///
     /// Source exhaustion and an explicit stop both drain accepted events and
     /// end in `Stopped`. A source error ends in `Failed` without fabricating
@@ -240,6 +241,7 @@ impl ObserveService {
                         EnqueueOutcome::Enqueued => self.report.accepted += 1,
                         EnqueueOutcome::DroppedFull => self.report.dropped += 1,
                     }
+                    self.process_one(processor);
                 }
                 Ok(None) => {
                     self.finish_gracefully(processor);
@@ -270,21 +272,27 @@ impl ObserveService {
 
     fn finish_gracefully<P: EventProcessor>(&mut self, processor: &mut P) {
         self.status = ObserverStatus::Stopping;
-        while let DequeueOutcome::Event(dequeued) = self.queue.try_dequeue() {
-            if dequeued.discontinuity_before_event {
-                processor.reset_after_discontinuity();
-                self.report.discontinuities += 1;
-            }
-            self.report.processed += 1;
-            match processor.process(&dequeued.event) {
-                ProcessorClassification::Unsupported => self.report.unsupported_events += 1,
-                ProcessorClassification::Invalid => self.report.invalid_events += 1,
-                ProcessorClassification::Ignored
-                | ProcessorClassification::Observed
-                | ProcessorClassification::BoundaryObserved => {}
-            }
-        }
+        while self.process_one(processor) {}
         self.status = ObserverStatus::Stopped;
+    }
+
+    fn process_one<P: EventProcessor>(&mut self, processor: &mut P) -> bool {
+        let DequeueOutcome::Event(dequeued) = self.queue.try_dequeue() else {
+            return false;
+        };
+        if dequeued.discontinuity_before_event {
+            processor.reset_after_discontinuity();
+            self.report.discontinuities += 1;
+        }
+        self.report.processed += 1;
+        match processor.process(&dequeued.event) {
+            ProcessorClassification::Unsupported => self.report.unsupported_events += 1,
+            ProcessorClassification::Invalid => self.report.invalid_events += 1,
+            ProcessorClassification::Ignored
+            | ProcessorClassification::Observed
+            | ProcessorClassification::BoundaryObserved => {}
+        }
+        true
     }
 }
 
@@ -440,6 +448,25 @@ mod tests {
     }
 
     #[test]
+    fn live_source_is_processed_continuously_without_capacity_overflow() {
+        let events = (1..=600).map(|sequence| Ok(Some(event(sequence))));
+        let mut source = MockSource {
+            events: events.chain([Ok(None)]).collect(),
+        };
+        let mut processor = MockProcessor::default();
+        let mut service = ObserveService::new(ObserveQueue::default());
+
+        let report = service.run(&mut source, &mut processor);
+
+        assert_eq!(report.received, 600);
+        assert_eq!(report.accepted, 600);
+        assert_eq!(report.dropped, 0);
+        assert_eq!(report.processed, 600);
+        assert_eq!(processor.processed, (1..=600).collect::<Vec<_>>());
+        assert_eq!(service.queue_stats().queued, 0);
+    }
+
+    #[test]
     fn mock_platform_adapter_feeds_validated_events_to_service_fifo() {
         let mut adapter = MockPlatformAdapter::new(vec![event(7), event(8), event(9)]);
         let mut processor = MockProcessor::default();
@@ -462,34 +489,32 @@ mod tests {
 
     #[test]
     fn source_failure_is_terminal_without_repoll_or_queue_drain() {
+        let mut queue = ObserveQueue::new(4).unwrap();
+        queue.try_enqueue(event(1));
+        queue.try_enqueue(event(2));
         let mut adapter = CountingFailingAdapter {
-            responses: VecDeque::from([
-                Ok(Some(event(10))),
-                Ok(Some(event(11))),
-                Err(ObserverError::EventSourceClosed),
-                Ok(Some(event(12))),
-            ]),
+            responses: VecDeque::from([Ok(Some(event(10))), Err(ObserverError::EventSourceClosed)]),
             polls: 0,
         };
         let mut processor = MockProcessor::default();
-        let mut service = ObserveService::new(ObserveQueue::new(4).unwrap());
+        let mut service = ObserveService::new(queue);
 
         let first_report = service.run(&mut adapter, &mut processor);
-        assert_eq!(adapter.polls, 3);
+        assert_eq!(adapter.polls, 2);
         assert_eq!(service.status(), ObserverStatus::Failed);
-        assert_eq!(first_report.received, 2);
-        assert_eq!(first_report.accepted, 2);
+        assert_eq!(first_report.received, 1);
+        assert_eq!(first_report.accepted, 1);
         assert_eq!(first_report.source_failures, 1);
-        assert_eq!(first_report.processed, 0);
+        assert_eq!(first_report.processed, 1);
         assert_eq!(service.queue_stats().queued, 2);
-        assert!(processor.processed.is_empty());
+        assert_eq!(processor.processed, vec![1]);
 
         let second_report = service.run(&mut adapter, &mut processor);
-        assert_eq!(adapter.polls, 3);
+        assert_eq!(adapter.polls, 2);
         assert_eq!(service.status(), ObserverStatus::Failed);
         assert_eq!(second_report, first_report);
         assert_eq!(service.queue_stats().queued, 2);
-        assert!(processor.processed.is_empty());
+        assert_eq!(processor.processed, vec![1]);
     }
 
     #[test]
@@ -537,7 +562,7 @@ mod tests {
         assert_eq!(report.received, 1);
         assert_eq!(report.accepted, 1);
         assert_eq!(report.source_failures, 1);
-        assert!(processor.processed.is_empty());
+        assert_eq!(processor.processed, vec![1]);
     }
 
     #[test]
@@ -553,10 +578,10 @@ mod tests {
         let mut processor = MockProcessor::default();
         let mut service = ObserveService::new(ObserveQueue::new(2).unwrap());
         let report = service.run(&mut source, &mut processor);
-        assert_eq!(report.dropped, 1);
-        assert_eq!(report.discontinuities, 1);
-        assert_eq!(processor.resets, 1);
-        assert_eq!(processor.processed, vec![1, 2]);
+        assert_eq!(report.dropped, 0);
+        assert_eq!(report.discontinuities, 0);
+        assert_eq!(processor.resets, 0);
+        assert_eq!(processor.processed, vec![1, 2, 3]);
     }
 
     #[test]

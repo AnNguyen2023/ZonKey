@@ -302,6 +302,45 @@ future Windows runtime work is not mistaken for an existing implementation.
 - No suppression, injection, replay, text editing, or foreground inspection is
   implied.
 
+#### M3A-05 — Windows observer hardening review — DONE
+
+- ADR 0006 proposes retaining the validated `WH_KEYBOARD_LL` spike
+  temporarily while requiring a bounded Raw Input comparison before
+  production release or decision-pipeline integration.
+- The production native boundary, ownership, loss, diagnostics, privacy, and
+  preconditions are documented; no implementation changes are included.
+- Owner accepted Decision C and the M3A-06 comparison is complete. The next
+  production phase selects `WH_KEYBOARD_LL`; Telex/detection/policy
+  integration remains a separate observe-only milestone.
+
+#### M3A-06 — Raw Input comparison spike — DONE
+
+- `zonkey-win` now has a parallel hidden-window Raw Input observer using
+  `RIDEV_INPUTSINK` without `RIDEV_NOLEGACY`.
+- `observe-hook` preserves the M3A-04 hook path; `observe-raw` runs the Raw
+  Input comparison path. Both use the existing observe-only service contract.
+- Automated mapping and bounded-handoff tests pass. Owner controlled
+  comparison passed for both paths; `WH_KEYBOARD_LL` is selected for the next
+  production phase because direct injected-origin visibility is available.
+- Raw Input remains a validated fallback for device identity and buffered
+  high-rate input; it is not permanently rejected.
+- Owner evidence records Raw Input 36/36 processed with no drops and Hook
+  96/96 received, accepted, and processed with no drops. A sustained hook run
+  previously exposed 53 downstream drops; M3A-07 resolved that bottleneck.
+- No Telex/detection/policy integration, injection, editing, suppression, or
+  foreground inspection is in scope.
+
+#### M3A-07 — Continuous observe-service consumption — DONE
+
+- `ObserveService` now processes one queued event after each source event and
+  drains the remainder only at terminal exhaustion/stop.
+- This deterministic single-thread fairness rule prevents a live source from
+  filling capacity 256 solely because processing was deferred until shutdown.
+- Source failure remains terminal without draining pending events; exhaustion
+  and explicit stop retain FIFO drain semantics.
+- Automated sustained-source evidence passes; Windows mechanism selection and
+  Telex/detection/policy integration remain out of scope.
+
 ### M3 — Windows prototype (2–3 tuần) — PLANNED
 
 - `zonkey-win` với low-level hook và safe event filtering.

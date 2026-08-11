@@ -115,6 +115,74 @@ The native boundary is isolated to `zonkey-win`; core crates remain
 platform-neutral. Automated checks do not replace the owner manual test; that
 M3A-04 acceptance has now passed.
 
+### M3A-05 hardening review — DONE
+
+ADR 0006 records decision class C: retain the validated `WH_KEYBOARD_LL`
+spike temporarily and require a separate Raw Input comparison. Owner accepted
+the comparison, which is now complete; the hook is selected for the next
+production phase without permanently rejecting Raw Input.
+
+The proposed production boundary permits minimal metadata capture, modifier
+and injection-origin mapping, sequence assignment, bounded non-blocking
+handoff, and deterministic shutdown. It forbids text reconstruction,
+foreground/context inspection, persistence, telemetry, suppression, replay,
+injection, editing, callback blocking, and raw key history. M3A-02 loss
+semantics and separate bridge/service counters remain the baseline.
+
+### M3A-06 Raw Input comparison spike — DONE
+
+`zonkey-win` now contains a parallel Raw Input path. It registers keyboard
+usage page `0x01`/usage `0x06` with `RIDEV_INPUTSINK` on a hidden message-only
+window and deliberately omits `RIDEV_NOLEGACY`. The path copies bounded
+`RAWKEYBOARD` metadata, maps through the same `ObservedInputEvent` contract,
+and uses a separate capacity-256 newest-drop bridge. `observe-hook` preserves
+the hook spike and `observe-raw` runs Raw Input.
+
+Raw Input does not provide a direct `LLKHF_INJECTED` equivalent in this
+boundary, so injection visibility is not claimed as equivalent. Owner
+controlled comparison is complete; no decision-pipeline integration exists
+yet.
+
+Final owner evidence: Raw Input processed 36/36 events with zero mapping or
+bridge drops; Hook received, accepted, and processed 96/96 events with zero
+mapping, bridge, lock, or service drops. Both paths passed modifier, repeat,
+shutdown, and transparency scenarios. The earlier 53-event loss was at the
+platform-neutral `ObserveQueue` and was resolved by M3A-07.
+
+M3A-06 exposed that the prior service loop filled its queue while polling a
+live source and deferred processing until terminal shutdown. M3A-07 changes
+the service loop to process one queued event after each source event, then
+resume polling. Exhaustion and explicit stop still drain the remainder FIFO;
+source failure still leaves pending events undrained. M3A-03's finite/mock
+contract remains valid for its original scope.
+
+### M3A-07 continuous service consumption — DONE
+
+The deterministic single-thread interleaving rule prevents a live source from
+filling capacity 256 solely because processing was deferred. The bounded queue
+remains meaningful for bursts and preserves newest-drop and discontinuity
+semantics. The 600-event sustained-source test processes all 600 events with
+zero drops. No threads, async runtime, Windows mechanism selection, or
+Telex/detection/policy integration is introduced.
+
+### Next production observer path
+
+For the next production phase, the selected observe-only path is:
+
+```text
+WH_KEYBOARD_LL
+  → bounded native bridge
+  → ObservedInputEvent
+  → continuous ObserveService
+  → future observe-only decision pipeline
+```
+
+This selection is phase-scoped, not permanent. Raw Input remains a validated
+alternative for device identity and buffered high-rate input, and retains the
+tradeoff of no direct injected-origin parity in the current boundary. Hook
+callback timeout, message-loop dependency, and limited device identity remain
+hardening/release risks. No input editing or injection exists.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 

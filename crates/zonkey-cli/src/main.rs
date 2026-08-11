@@ -1,10 +1,21 @@
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("observe") {
-        if let Err(error) = zonkey_win::run_observe() {
-            eprintln!("ZonKey observe failed: {error}");
-            std::process::exit(1);
+    match std::env::args().nth(1).as_deref() {
+        Some("observe" | "observe-hook") => {
+            if let Err(error) = zonkey_win::run_observe() {
+                eprintln!("ZonKey observe failed: {error}");
+                std::process::exit(1);
+            }
         }
-    } else {
-        println!("Zonkey: architecture and audit phase; use `observe` for the Windows spike.");
+        Some("observe-raw") => {
+            if let Err(error) = zonkey_win::run_observe_raw() {
+                eprintln!("ZonKey raw observe failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        _ => {
+            println!(
+                "Zonkey: architecture and audit phase; use `observe-hook` or `observe-raw` for the Windows spikes."
+            );
+        }
     }
 }
