@@ -431,6 +431,10 @@ impl DiagnosticDecisionProcessor {
         self.telex = TelexEngine::new();
     }
 
+    fn invalidate_restore_plan(&mut self) {
+        self.last_restore_plan = None;
+    }
+
     fn update_shortcut_state(&mut self, event: &ObservedInputEvent) -> bool {
         let Some(modifier) = event.key.modifier_value() else {
             return false;
@@ -585,6 +589,7 @@ impl EventProcessor for DiagnosticDecisionProcessor {
             return ProcessorClassification::Ignored;
         }
         if event.key.is_backspace() {
+            self.invalidate_restore_plan();
             let _ = self.telex.process(EngineEvent::Backspace);
             return ProcessorClassification::Observed;
         }
@@ -613,6 +618,7 @@ impl EventProcessor for DiagnosticDecisionProcessor {
             self.last_restore_plan = None;
             return ProcessorClassification::Unsupported;
         };
+        self.invalidate_restore_plan();
         if self
             .telex
             .process(EngineEvent::Character(character))
@@ -1135,6 +1141,231 @@ mod tests {
         assert!(processor.last_restore_plan().is_some());
         processor.reset_after_discontinuity();
         assert_eq!(processor.last_restore_plan(), None);
+    }
+
+    #[test]
+    fn semantic_input_invalidates_previous_restore_plan() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert!(processor.last_restore_plan().is_some());
+
+        processor.process(&key_event(
+            8,
+            ObservedKey::letter('h').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.last_restore_plan(), None);
+    }
+
+    #[test]
+    fn later_keep_or_ambiguous_decision_clears_previous_plan() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert!(processor.last_restore_plan().is_some());
+
+        for (sequence, character) in [(8, 'd'), (9, 'u'), (10, 'n'), (11, 'g'), (12, 'f')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            13,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.last_decision(), Some(DiagnosticDecision::Keep));
+        assert_eq!(processor.last_restore_plan(), None);
+
+        for (sequence, character) in [
+            (14, 'r'),
+            (15, 'e'),
+            (16, 's'),
+            (17, 'u'),
+            (18, 'm'),
+            (19, 'e'),
+        ] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            20,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert!(processor.last_restore_plan().is_some());
+        for (sequence, character) in [(21, 'h'), (22, 'e'), (23, 'l'), (24, 'l'), (25, 'o')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            26,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(
+            processor.last_decision(),
+            Some(DiagnosticDecision::Ambiguous)
+        );
+        assert_eq!(processor.last_restore_plan(), None);
+    }
+
+    #[test]
+    fn new_restore_candidate_replaces_previous_plan_and_transitions_do_not() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(
+            processor.last_restore_plan().unwrap().original_token,
+            "resume"
+        );
+
+        processor.process(&key_event(
+            8,
+            ObservedKey::letter('A').unwrap(),
+            KeyEventKind::KeyUp,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            9,
+            ObservedKey::modifier(zonkey_types::ModifierKey::Shift),
+            KeyEventKind::KeyDown,
+            ModifierState::new().with_shift(true),
+            physical,
+        ));
+        assert_eq!(
+            processor.last_restore_plan().unwrap().original_token,
+            "resume"
+        );
+
+        for (sequence, character) in [
+            (10, 'r'),
+            (11, 'e'),
+            (12, 'f'),
+            (13, 'r'),
+            (14, 'e'),
+            (15, 's'),
+            (16, 'h'),
+        ] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            17,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(
+            processor.last_restore_plan().unwrap().original_token,
+            "refresh"
+        );
+    }
+
+    #[test]
+    fn injected_event_does_not_create_or_clear_plan() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert!(processor.last_restore_plan().is_some());
+        processor.process(&key_event(
+            8,
+            ObservedKey::letter('x').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            zonkey_types::InjectionOrigin::MarkedInjected,
+        ));
+        assert!(processor.last_restore_plan().is_some());
     }
 
     #[test]

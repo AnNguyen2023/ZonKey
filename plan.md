@@ -446,6 +446,19 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
   dropped=0, processed=16, discontinuities=0, source_failures=0,
   unsupported_events=0.
 
+#### M3C-02 - Restore-plan lifecycle and validation - DONE
+
+- Validate bounded current-plan ownership and deterministic invalidation.
+- Semantic input, Backspace, new decisions, Escape, unsupported input, and
+  discontinuity invalidate or replace stale plans; non-semantic transitions
+  remain read-only and do not create plans.
+- No plan identity, simulated consumption, execution, or OS mutation is
+  introduced. See ADR 0010.
+- Owner manual validation: `resume` created a plan, `hello` cleared it with
+  Ambiguous/no plan, and `config` deterministically replaced it. Runtime
+  counters were received=56, accepted=56, dropped=0, processed=56,
+  discontinuities=0, source_failures=0, unsupported_events=0.
+
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
 

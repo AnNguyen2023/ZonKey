@@ -273,6 +273,20 @@ Owner manual validation confirmed `resume` simulation with
 `replace_len=5`/`replacement_len=6`, while `dungf` produced Keep/no plan and
 `hello` produced Ambiguous/no plan. No text modification occurred.
 
+### M3C-02 restore-plan lifecycle and validation - DONE
+
+The latest optional plan is the complete lifecycle model: semantic token
+input, Backspace, boundaries, Escape, unsupported input, and discontinuity
+invalidate it; a later RestoreCandidate replaces it. Key-up, modifier-only,
+shortcut, and injected transitions do not create semantic token intent and
+preserve an existing plan. Reading the plan is immutable and non-consuming.
+No generation or one-shot simulation API is needed at this boundary.
+Owner manual validation confirmed `resume` produced a current plan,
+`hello` cleared it with Ambiguous/no plan, and `config` replaced it with a
+new RestoreCandidate plan. Runtime counters were received=56, accepted=56,
+dropped=0, processed=56, discontinuities=0, source_failures=0,
+unsupported_events=0. No text modification occurred.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
