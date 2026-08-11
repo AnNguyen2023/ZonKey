@@ -424,7 +424,7 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
   corpus: active remains 356 and planned is now 55. See
   `docs/m3b-07-planned-corpus-hygiene.md`.
 
-#### M3B-08 - Transformed ambiguity review - IN REVIEW
+#### M3B-08 - Transformed ambiguity review - DONE
 
 - Review-only inventory of genuinely transformed tokens that remain ambiguous.
 - Current inventory has five technical-editor cases; all are expected

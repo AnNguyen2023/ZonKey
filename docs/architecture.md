@@ -252,7 +252,7 @@ the planned set was historical/stale backlog and M3B-07 removed it from the
 executable planned corpus. Active remains 356, planned is now 55. No runtime
 behavior changes.
 
-### M3B-08 transformed ambiguity review - IN REVIEW
+### M3B-08 transformed ambiguity review - DONE
 
 The review inventory found five transformed `Ambiguous` cases, all in the
 technical-editor context. They are expected conservative outcomes because
