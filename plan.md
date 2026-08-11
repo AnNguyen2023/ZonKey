@@ -390,6 +390,25 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
   planned structured-token fixtures remain inactive.
 - No detector, policy, Telex, dictionary, Windows, or runtime behavior changed.
 
+#### M3B-05 - Transformed English recovery coverage - DONE
+
+- Reviewing one category only: exact dictionary-backed English/technical/
+  product recovery after a real Telex mutation (`raw != rendered`).
+- Existing active evidence covers 43 English, 12 technical, and 8 product
+  cases with no active mismatches. Vietnamese and restricted-context cases
+  remain negative controls.
+- Planned historical recovery fixtures remain inactive. No detector, policy,
+  Telex, dictionary, threshold, Windows, or runtime behavior changed.
+- Planned recovery-labelled records, including `pull`, are not treated as
+  activation evidence until individually audited.
+
+#### M3B-06 - Planned transformed-recovery fixture audit - PLANNED
+
+- Audit all 14 planned transformed records as valid transformation,
+  unchanged-token, already-covered, outdated expectation, or unclear.
+- Do not activate or modify fixtures until owner review; no detector or policy
+  tuning is in scope.
+
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
 

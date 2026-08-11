@@ -234,6 +234,20 @@ secret-like values. The active corpus remains at 356 fixtures and the 69
 planned structured-token cases remain inactive. No additional fixture was
 necessary and no runtime or decision behavior changed.
 
+### M3B-05 transformed English recovery coverage - DONE
+
+This review isolates exact dictionary-backed recovery after Telex mutation.
+The active corpus contains 43 English, 12 technical, and 8 product examples
+with `raw != rendered`, all passing the existing classifier/policy harness.
+Vietnamese and restricted-context cases remain negative controls. Planned
+historical recovery-labelled records are not activation evidence; `pull` is
+specifically a planned fixture requiring audit because current Telex evidence
+does not show a mutation. No detector, policy, Telex, dictionary, threshold,
+or runtime behavior changes in this review.
+
+M3B-06 is planned to audit all 14 planned transformed records individually
+before any fixture activation.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
