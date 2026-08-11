@@ -210,6 +210,21 @@ remains unaware of Telex, dictionaries, detection, and policy. Foreground
 context, Unicode reconstruction, persistence, injection, suppression, replay,
 and text editing remain out of scope.
 
+### M3B-02 decision-quality review - DONE
+
+The review reuses the existing JSONL Telex and policy corpus harness rather
+than changing runtime behavior. It covers 355 active fixtures and keeps 69
+planned fixtures inactive. Active M2 evidence includes exact dictionary
+recovery, Vietnamese negatives, never-transform structures, restricted
+contexts, and explicit ambiguity. The live `hello` ambiguity is supported by
+an active fixture. `pull` follows the recovery invariant that `raw == rendered`
+provides no recovery evidence; `abc123` has active conservative coverage.
+
+No detector threshold, dictionary entry, Telex rule, policy rule, or editing
+capability is changed by M3B-02/M3B-03. Recovery candidate evidence requires
+an observed transformation or mutation signal; dictionary membership alone is
+insufficient for an unchanged token.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 

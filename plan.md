@@ -360,6 +360,26 @@ future Windows runtime work is not mistaken for an existing implementation.
 
 This milestone remains in progress pending owner Windows diagnostic evidence.
 
+#### M3B-02 - Diagnostic decision-quality review - DONE
+
+- Existing active/planned Telex and M2 JSONL fixtures were reviewed through
+  the existing deterministic corpus harness; no detector, dictionary, Telex,
+  or policy behavior was changed.
+- Active M2 evidence covers exact English/technical/product recovery,
+  Vietnamese negatives, never-transform structures, restricted contexts, and
+  expected ambiguity. `hello` is an active expected ambiguity.
+- Owner accepted the unchanged-token recovery invariant: `raw == rendered`
+  yields no recovery evidence from dictionary membership alone. `hello`
+  remains expected ambiguity; `pull` remains conservative; `abc123` now has
+  active ambiguous coverage.
+
+#### M3B-03 - Owner-approved conservative decision fixtures - DONE
+
+- Added active `abc123` ambiguous coverage and retained the existing `pull`
+  unchanged-dictionary regression and `hello` ambiguous fixture.
+- No detector, dictionary, Telex, policy, threshold, or runtime behavior was
+  changed. The milestone records product expectations without broad tuning.
+
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
 
