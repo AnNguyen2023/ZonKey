@@ -183,6 +183,33 @@ tradeoff of no direct injected-origin parity in the current boundary. Hook
 callback timeout, message-loop dependency, and limited device identity remain
 hardening/release risks. No input editing or injection exists.
 
+### M3B-01 real-input diagnostic decision pipeline - IN PROGRESS
+
+ADR 0008 records this intentionally narrow processor boundary.
+
+The current diagnostic path is deliberately separate from native capture:
+
+```text
+zonkey-win observed events
+  -> bounded ObserveService
+  -> DiagnosticDecisionProcessor (zonkey-service)
+  -> TelexEngine -> classifier -> SafePolicy
+  -> sanitized decision category
+```
+
+`cargo run -p zonkey-cli -- diagnose` uses the existing hook source and this
+processor. The processor consumes only validated `ObservedInputEvent` values;
+key-up, shortcut, injected-origin, unsupported, and discontinuity cases do not
+mutate a token across unsafe boundaries. It observes abstract policy outcomes
+only and never executes an `EditPlan` or changes user text. Output is
+token-length/decision metadata by default; `--show-token` is a temporary
+foreground debug option with no persistence.
+
+This is diagnostic evidence work, not a production IME runtime. Native code
+remains unaware of Telex, dictionaries, detection, and policy. Foreground
+context, Unicode reconstruction, persistence, injection, suppression, replay,
+and text editing remain out of scope.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
@@ -195,7 +222,8 @@ zonkey-token ──→ unicode-segmentation
    ↑
 zonkey-telex
    ↑
-zonkey-service → zonkey-policy → zonkey-detect → zonkey-types
+zonkey-service → zonkey-token / zonkey-telex / zonkey-detect / zonkey-policy
+             → zonkey-types
    ↑
 zonkey-cli
 

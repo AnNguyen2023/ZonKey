@@ -260,6 +260,7 @@ dependencies = [
 name = "zonkey-service"
 version = "0.1.0"
 dependencies = [
+ "zonkey-detect",
  "zonkey-policy",
  "zonkey-telex",
  "zonkey-token",

@@ -182,6 +182,36 @@ impl ObservedKey {
             _ => None,
         }
     }
+
+    /// Returns whether this is the space key.
+    #[must_use]
+    pub const fn is_space(self) -> bool {
+        matches!(self.0, ObservedKeyKind::Space)
+    }
+
+    /// Returns whether this is the Enter key.
+    #[must_use]
+    pub const fn is_enter(self) -> bool {
+        matches!(self.0, ObservedKeyKind::Enter)
+    }
+
+    /// Returns whether this is the Tab key.
+    #[must_use]
+    pub const fn is_tab(self) -> bool {
+        matches!(self.0, ObservedKeyKind::Tab)
+    }
+
+    /// Returns whether this is the Backspace key.
+    #[must_use]
+    pub const fn is_backspace(self) -> bool {
+        matches!(self.0, ObservedKeyKind::Backspace)
+    }
+
+    /// Returns whether this is the Escape key.
+    #[must_use]
+    pub const fn is_escape(self) -> bool {
+        matches!(self.0, ObservedKeyKind::Escape)
+    }
 }
 
 /// Immutable state for the four supported modifier keys.
@@ -535,6 +565,11 @@ mod tests {
         assert_eq!(ObservedKey::tab(), ObservedKey::tab());
         assert_eq!(ObservedKey::backspace(), ObservedKey::backspace());
         assert_eq!(ObservedKey::escape(), ObservedKey::escape());
+        assert!(ObservedKey::space().is_space());
+        assert!(ObservedKey::enter().is_enter());
+        assert!(ObservedKey::tab().is_tab());
+        assert!(ObservedKey::backspace().is_backspace());
+        assert!(ObservedKey::escape().is_escape());
         assert_eq!(
             ObservedKey::modifier(ModifierKey::Shift).modifier_value(),
             Some(ModifierKey::Shift)

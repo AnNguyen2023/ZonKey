@@ -391,6 +391,43 @@ pub fn run_observe() -> Result<(), &'static str> {
     }
 }
 
+/// Runs the same Windows observe source with a caller-owned, platform-neutral
+/// processor. The adapter only orchestrates capture and service lifecycle.
+pub fn run_observe_with_processor<P: EventProcessor>(mut processor: P) -> Result<(), &'static str> {
+    OBSERVER_THREAD_ID.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+    unsafe { SetConsoleCtrlHandler(Some(console_handler), true) }
+        .map_err(|_| "failed to install console stop handler")?;
+    let Ok(mut source) = WindowsObserveSource::new() else {
+        OBSERVER_THREAD_ID.store(0, Ordering::Relaxed);
+        let _ = unsafe { SetConsoleCtrlHandler(Some(console_handler), false) };
+        return Err("failed to install keyboard hook");
+    };
+    println!("ZonKey observe-only diagnostic mode");
+    println!("observer_thread_started");
+    println!("hook=installed message_loop=running");
+    println!("Press Ctrl+C to stop");
+    let mut service = ObserveService::new(zonkey_service::ObserveQueue::default());
+    let report = service.run(&mut source, &mut processor);
+    let bridge_dropped = WindowsObserveSource::dropped_events();
+    let _ = unsafe { SetConsoleCtrlHandler(Some(console_handler), false) };
+    println!(
+        "stopped status={:?} received={} accepted={} dropped={} processed={} discontinuities={} source_failures={} unsupported_events={}",
+        service.status(),
+        report.received,
+        report.accepted,
+        report.dropped,
+        report.processed,
+        report.discontinuities,
+        report.source_failures,
+        report.unsupported_events,
+    );
+    if bridge_dropped == u64::MAX || service.status() == zonkey_types::ObserverStatus::Failed {
+        Err("observe source failed")
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BridgeState, HookGuard, WindowsObserveSource, bridge};

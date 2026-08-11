@@ -5,7 +5,13 @@
 
 use std::collections::VecDeque;
 
-use zonkey_types::{ObservedInputEvent, ObserverError, ObserverStatus};
+use zonkey_detect::{BuiltInDictionaries, Classifier, DetectionRequest, LexicalEvidence};
+use zonkey_policy::SafePolicy;
+use zonkey_telex::TelexEngine;
+use zonkey_types::{
+    EngineEvent, InjectionOrigin, InputContext, KeyEventKind, ObservedInputEvent, ObserverError,
+    ObserverStatus, TokenBoundary,
+};
 
 /// The default maximum number of events retained by an observe queue.
 pub const DEFAULT_OBSERVE_QUEUE_CAPACITY: usize = 256;
@@ -296,6 +302,260 @@ impl ObserveService {
     }
 }
 
+/// Sanitized decision category emitted by the diagnostic processor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticDecision {
+    /// No recovery decision was warranted.
+    Keep,
+    /// The policy found a candidate, but it remains diagnostic-only.
+    RestoreCandidate,
+    /// The evidence was insufficient for recovery.
+    Ambiguous,
+    /// The token was outside the supported diagnostic scope.
+    Unsupported,
+}
+
+/// Stateful, observe-only bridge from validated events to M1/M2 decisions.
+///
+/// This processor reports only sanitized decision categories. It never
+/// executes an [`EditPlan`](zonkey_types::EditPlan), edits user text, or
+/// returns a command to a platform adapter.
+#[allow(clippy::struct_excessive_bools)]
+pub struct DiagnosticDecisionProcessor {
+    telex: TelexEngine,
+    classifier: Classifier<BuiltInDictionaries>,
+    policy: SafePolicy,
+    context: InputContext,
+    show_token: bool,
+    completed_tokens: u64,
+    resets: u64,
+    injected_events: u64,
+    control_down: bool,
+    alt_down: bool,
+    meta_down: bool,
+    last_token_lengths: Option<(usize, usize)>,
+    last_decision: Option<DiagnosticDecision>,
+}
+
+impl DiagnosticDecisionProcessor {
+    /// Creates a writing-context processor. `show_token` is a temporary,
+    /// foreground-only development diagnostic and is disabled by default.
+    #[must_use]
+    pub fn new(show_token: bool) -> Self {
+        Self {
+            telex: TelexEngine::new(),
+            classifier: Classifier::new(BuiltInDictionaries),
+            policy: SafePolicy,
+            context: InputContext::Writing,
+            show_token,
+            completed_tokens: 0,
+            resets: 0,
+            injected_events: 0,
+            control_down: false,
+            alt_down: false,
+            meta_down: false,
+            last_token_lengths: None,
+            last_decision: None,
+        }
+    }
+
+    /// Number of token boundaries evaluated so far.
+    #[must_use]
+    pub const fn completed_tokens(&self) -> u64 {
+        self.completed_tokens
+    }
+
+    /// Number of continuity resets delivered by the service.
+    #[must_use]
+    pub const fn reset_count(&self) -> u64 {
+        self.resets
+    }
+
+    /// Number of injected-origin events excluded from token mutation.
+    #[must_use]
+    pub const fn injected_events(&self) -> u64 {
+        self.injected_events
+    }
+
+    /// Last sanitized policy category, if a boundary has been evaluated.
+    #[must_use]
+    pub const fn last_decision(&self) -> Option<DiagnosticDecision> {
+        self.last_decision
+    }
+
+    /// Returns the lengths of the most recently evaluated non-empty token.
+    #[must_use]
+    pub const fn last_token_lengths(&self) -> Option<(usize, usize)> {
+        self.last_token_lengths
+    }
+
+    fn reset_token(&mut self) {
+        self.telex = TelexEngine::new();
+    }
+
+    fn update_shortcut_state(&mut self, event: &ObservedInputEvent) -> bool {
+        let Some(modifier) = event.key.modifier_value() else {
+            return false;
+        };
+        let active = !matches!(event.kind, KeyEventKind::KeyUp | KeyEventKind::SystemKeyUp);
+        match modifier {
+            zonkey_types::ModifierKey::Control => self.control_down = active,
+            zonkey_types::ModifierKey::Alt => self.alt_down = active,
+            zonkey_types::ModifierKey::Meta => self.meta_down = active,
+            zonkey_types::ModifierKey::Shift => {}
+        }
+        true
+    }
+
+    fn boundary_for(event: &ObservedInputEvent) -> Option<TokenBoundary> {
+        if event.key.is_space() {
+            Some(TokenBoundary::Space)
+        } else if event.key.is_enter() {
+            Some(TokenBoundary::Enter)
+        } else if event.key.is_tab() {
+            Some(TokenBoundary::Tab)
+        } else {
+            event
+                .key
+                .punctuation_value()
+                .map(TokenBoundary::Punctuation)
+        }
+    }
+
+    fn evaluate_boundary(&mut self, boundary: TokenBoundary) -> ProcessorClassification {
+        let raw = self.telex.token().raw_ascii.clone();
+        let rendered = self.telex.token().rendered.clone();
+        if raw.is_empty() && rendered.is_empty() {
+            let _ = self.telex.process(EngineEvent::Boundary(boundary));
+            return ProcessorClassification::BoundaryObserved;
+        }
+        self.last_token_lengths = Some((raw.len(), rendered.len()));
+        let evidence = self.classifier.classify(DetectionRequest {
+            raw: &raw,
+            rendered: &rendered,
+            boundary: &boundary,
+            context: self.context,
+        });
+        let outcome = self
+            .policy
+            .decide(evidence.clone(), self.context, &rendered);
+        let decision = match outcome.decision {
+            zonkey_types::RecoveryDecision::RestoreEnglish { .. } => {
+                DiagnosticDecision::RestoreCandidate
+            }
+            zonkey_types::RecoveryDecision::Ambiguous { .. } => DiagnosticDecision::Ambiguous,
+            zonkey_types::RecoveryDecision::KeepVietnamese { .. } => match evidence {
+                LexicalEvidence::Unsupported => DiagnosticDecision::Unsupported,
+                _ => DiagnosticDecision::Keep,
+            },
+        };
+        self.completed_tokens = self.completed_tokens.saturating_add(1);
+        self.last_decision = Some(decision);
+        if self.show_token {
+            println!(
+                "decision={decision:?} token={raw:?} rendered_len={} boundary={boundary:?}",
+                rendered.len()
+            );
+        } else {
+            println!(
+                "decision={decision:?} token_len={} rendered_len={} boundary={boundary:?}",
+                raw.len(),
+                rendered.len()
+            );
+        }
+        let _ = self.telex.process(EngineEvent::Boundary(boundary));
+        ProcessorClassification::BoundaryObserved
+    }
+}
+
+impl Default for DiagnosticDecisionProcessor {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl EventProcessor for DiagnosticDecisionProcessor {
+    fn reset_after_discontinuity(&mut self) {
+        self.reset_token();
+        self.control_down = false;
+        self.alt_down = false;
+        self.meta_down = false;
+        self.resets = self.resets.saturating_add(1);
+        println!("discontinuity=true decision_state=reset");
+    }
+
+    fn process(&mut self, event: &ObservedInputEvent) -> ProcessorClassification {
+        if matches!(
+            event.injection_origin,
+            InjectionOrigin::MarkedInjected | InjectionOrigin::LowerIntegrityInjected
+        ) {
+            self.injected_events = self.injected_events.saturating_add(1);
+            println!("decision=Ignored reason=injected");
+            return ProcessorClassification::Ignored;
+        }
+        if self.update_shortcut_state(event) {
+            return ProcessorClassification::Ignored;
+        }
+        if matches!(event.kind, KeyEventKind::KeyUp | KeyEventKind::SystemKeyUp) {
+            return ProcessorClassification::Ignored;
+        }
+        if event.modifiers.control()
+            || event.modifiers.alt()
+            || event.modifiers.meta()
+            || self.control_down
+            || self.alt_down
+            || self.meta_down
+        {
+            return ProcessorClassification::Ignored;
+        }
+        if event.key.modifier_value().is_some() {
+            return ProcessorClassification::Ignored;
+        }
+        if event.key.is_escape() {
+            self.reset_token();
+            return ProcessorClassification::Ignored;
+        }
+        if event.key.is_backspace() {
+            let _ = self.telex.process(EngineEvent::Backspace);
+            return ProcessorClassification::Observed;
+        }
+        if let Some(boundary) = Self::boundary_for(event) {
+            return self.evaluate_boundary(boundary);
+        }
+        let character = event
+            .key
+            .letter_value()
+            .map(|value| {
+                if event.modifiers.shift() {
+                    value
+                } else {
+                    value.to_ascii_lowercase()
+                }
+            })
+            .or_else(|| {
+                event
+                    .key
+                    .digit_value()
+                    .map(|value| char::from(b'0' + value))
+            })
+            .ok_or(());
+        let Ok(character) = character else {
+            self.reset_token();
+            return ProcessorClassification::Unsupported;
+        };
+        if self
+            .telex
+            .process(EngineEvent::Character(character))
+            .is_ok()
+        {
+            ProcessorClassification::Observed
+        } else {
+            self.reset_token();
+            ProcessorClassification::Unsupported
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +567,22 @@ mod tests {
             kind: KeyEventKind::KeyDown,
             modifiers: ModifierState::new(),
             injection_origin: zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+            sequence: EventSequence::new(sequence).expect("test sequence is non-zero"),
+        }
+    }
+
+    fn key_event(
+        sequence: u64,
+        key: zonkey_types::ObservedKey,
+        kind: KeyEventKind,
+        modifiers: ModifierState,
+        injection_origin: zonkey_types::InjectionOrigin,
+    ) -> ObservedInputEvent {
+        ObservedInputEvent {
+            key,
+            kind,
+            modifiers,
+            injection_origin,
             sequence: EventSequence::new(sequence).expect("test sequence is non-zero"),
         }
     }
@@ -632,5 +908,296 @@ mod tests {
         assert_eq!(report.processed, 1);
         assert_eq!(report.unsupported_events, 0);
         assert_eq!(report.invalid_events, 0);
+    }
+
+    #[test]
+    fn diagnostic_processor_evaluates_english_and_telex_tokens() {
+        let mut processor = DiagnosticDecisionProcessor::default();
+        let mut sequence = 1;
+        for character in "resume".chars() {
+            let key = ObservedKey::letter(character).expect("ASCII letter");
+            assert_eq!(
+                processor.process(&key_event(
+                    sequence,
+                    key,
+                    KeyEventKind::KeyDown,
+                    ModifierState::new(),
+                    zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+                )),
+                ProcessorClassification::Observed
+            );
+            sequence += 1;
+        }
+        assert_eq!(
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::space(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+            )),
+            ProcessorClassification::BoundaryObserved
+        );
+        assert_eq!(processor.completed_tokens(), 1);
+        assert_eq!(
+            processor.last_decision(),
+            Some(DiagnosticDecision::RestoreCandidate)
+        );
+
+        for character in "dungf".chars() {
+            let key = ObservedKey::letter(character).expect("ASCII letter");
+            processor.process(&key_event(
+                sequence,
+                key,
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+            ));
+            sequence += 1;
+        }
+        processor.process(&key_event(
+            sequence,
+            ObservedKey::enter(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+        ));
+        assert_eq!(processor.completed_tokens(), 2);
+    }
+
+    #[test]
+    fn diagnostic_processor_handles_backspace_shortcuts_shift_keyup_and_injection() {
+        let mut processor = DiagnosticDecisionProcessor::default();
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let shifted = ModifierState::new().with_shift(true);
+        assert_eq!(
+            processor.process(&key_event(
+                1,
+                ObservedKey::letter('A').unwrap(),
+                KeyEventKind::KeyDown,
+                shifted,
+                physical,
+            )),
+            ProcessorClassification::Observed
+        );
+        assert_eq!(
+            processor.process(&key_event(
+                2,
+                ObservedKey::letter('A').unwrap(),
+                KeyEventKind::KeyUp,
+                shifted,
+                physical,
+            )),
+            ProcessorClassification::Ignored
+        );
+        assert_eq!(
+            processor.process(&key_event(
+                3,
+                ObservedKey::backspace(),
+                KeyEventKind::KeyDown,
+                shifted,
+                physical,
+            )),
+            ProcessorClassification::Observed
+        );
+        assert_eq!(
+            processor.process(&key_event(
+                4,
+                ObservedKey::letter('C').unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new().with_control(true),
+                physical,
+            )),
+            ProcessorClassification::Ignored
+        );
+        assert_eq!(
+            processor.process(&key_event(
+                5,
+                ObservedKey::letter('B').unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                zonkey_types::InjectionOrigin::MarkedInjected,
+            )),
+            ProcessorClassification::Ignored
+        );
+        assert_eq!(processor.injected_events(), 1);
+        processor.reset_after_discontinuity();
+        assert_eq!(processor.reset_count(), 1);
+        assert_eq!(processor.completed_tokens(), 0);
+    }
+
+    #[test]
+    fn diagnostic_processor_ignores_repeated_empty_boundaries() {
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for key in [
+            ObservedKey::enter(),
+            ObservedKey::space(),
+            ObservedKey::tab(),
+            ObservedKey::punctuation('.').unwrap(),
+        ] {
+            assert_eq!(
+                processor.process(&key_event(
+                    1,
+                    key,
+                    KeyEventKind::KeyDown,
+                    ModifierState::new(),
+                    zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+                )),
+                ProcessorClassification::BoundaryObserved
+            );
+        }
+        assert_eq!(processor.completed_tokens(), 0);
+        assert_eq!(processor.last_decision(), None);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn diagnostic_processor_shortcuts_preserve_token_state() {
+        let mut processor = DiagnosticDecisionProcessor::default();
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        for (sequence, character) in [(1, 'a'), (2, 'b')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            3,
+            ObservedKey::modifier(zonkey_types::ModifierKey::Control),
+            KeyEventKind::KeyDown,
+            ModifierState::new().with_control(true),
+            physical,
+        ));
+        processor.process(&key_event(
+            4,
+            ObservedKey::letter('X').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            5,
+            ObservedKey::letter('X').unwrap(),
+            KeyEventKind::KeyUp,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            6,
+            ObservedKey::modifier(zonkey_types::ModifierKey::Control),
+            KeyEventKind::KeyUp,
+            ModifierState::new(),
+            physical,
+        ));
+        for (sequence, character) in [(7, 'c'), (8, 'd')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            9,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.last_token_lengths(), Some((4, 4)));
+
+        for (sequence, character) in [(10, 'a'), (11, 'b')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            12,
+            ObservedKey::modifier(zonkey_types::ModifierKey::Alt),
+            KeyEventKind::KeyDown,
+            ModifierState::new().with_alt(true),
+            physical,
+        ));
+        processor.process(&key_event(
+            13,
+            ObservedKey::letter('A').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            14,
+            ObservedKey::modifier(zonkey_types::ModifierKey::Alt),
+            KeyEventKind::KeyUp,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            15,
+            ObservedKey::letter('c').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            16,
+            ObservedKey::letter('d').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            17,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.last_token_lengths(), Some((4, 4)));
+    }
+
+    #[test]
+    fn diagnostic_processor_backspace_recomposes_hellp_to_hello() {
+        let mut processor = DiagnosticDecisionProcessor::default();
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        for (sequence, character) in [(1, 'h'), (2, 'e'), (3, 'l'), (4, 'l'), (5, 'p')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            6,
+            ObservedKey::backspace(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            7,
+            ObservedKey::letter('o').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        processor.process(&key_event(
+            8,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.last_token_lengths(), Some((5, 5)));
     }
 }

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+zonkey-detect = { path = "../zonkey-detect" }
 zonkey-policy = { path = "../zonkey-policy" }
 zonkey-telex = { path = "../zonkey-telex" }
 zonkey-token = { path = "../zonkey-token" }
@@ -13,4 +14,3 @@ zonkey-types = { path = "../zonkey-types" }
 
 [lints]
 workspace = true
-

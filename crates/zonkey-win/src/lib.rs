@@ -169,6 +169,17 @@ fn map_key(virtual_key: u32) -> Option<ObservedKey> {
         0x11 | 0xa2 | 0xa3 => Some(ObservedKey::modifier(ModifierKey::Control)),
         0x12 | 0xa4 | 0xa5 => Some(ObservedKey::modifier(ModifierKey::Alt)),
         0x5b | 0x5c => Some(ObservedKey::modifier(ModifierKey::Meta)),
+        0xba => ObservedKey::punctuation(';').ok(),
+        0xbb => ObservedKey::punctuation('=').ok(),
+        0xbc => ObservedKey::punctuation(',').ok(),
+        0xbd => ObservedKey::punctuation('-').ok(),
+        0xbe => ObservedKey::punctuation('.').ok(),
+        0xbf => ObservedKey::punctuation('/').ok(),
+        0xc0 => ObservedKey::punctuation('`').ok(),
+        0xdb => ObservedKey::punctuation('[').ok(),
+        0xdc => ObservedKey::punctuation('\\').ok(),
+        0xdd => ObservedKey::punctuation(']').ok(),
+        0xde => ObservedKey::punctuation('\'').ok(),
         _ => Some(ObservedKey::other()),
     }
 }
@@ -199,6 +210,18 @@ pub fn run_observe_raw() -> Result<(), &'static str> {
     raw::run_observe_raw()
 }
 
+/// Runs the hook source with a platform-neutral diagnostic processor.
+///
+/// # Errors
+///
+/// Returns a sanitized startup or observer failure.
+#[cfg(windows)]
+pub fn run_observe_with_processor<P: zonkey_service::EventProcessor>(
+    processor: P,
+) -> Result<(), &'static str> {
+    native::run_observe_with_processor(processor)
+}
+
 /// Windows observation is unavailable on non-Windows hosts.
 ///
 /// # Errors
@@ -213,6 +236,18 @@ pub fn run_observe() -> Result<(), &'static str> {
 #[cfg(not(windows))]
 pub fn run_observe_raw() -> Result<(), &'static str> {
     Err("Raw Input spike requires a Windows host")
+}
+
+/// Diagnostic processing is unavailable on non-Windows hosts.
+///
+/// # Errors
+///
+/// Always returns an unsupported-platform error.
+#[cfg(not(windows))]
+pub fn run_observe_with_processor<P: zonkey_service::EventProcessor>(
+    _processor: P,
+) -> Result<(), &'static str> {
+    Err("Windows observe-only diagnostic requires a Windows host")
 }
 
 #[cfg(test)]
@@ -300,6 +335,17 @@ mod tests {
                 zonkey_types::InjectionOrigin::LowerIntegrityInjected
             );
         }
+        let (punctuation, _) = map_native_event(
+            NativeKeyboardEvent {
+                message: 0x0100,
+                virtual_key: 0xbe,
+                flags: 0,
+                sequence: 99,
+            },
+            ModifierTracker::default(),
+        )
+        .unwrap();
+        assert_eq!(punctuation.key.punctuation_value(), Some('.'));
     }
 
     #[test]

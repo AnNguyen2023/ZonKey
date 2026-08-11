@@ -12,9 +12,17 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("diagnose" | "observe-decisions") => {
+            let show_token = std::env::args().any(|arg| arg == "--show-token");
+            let processor = zonkey_service::DiagnosticDecisionProcessor::new(show_token);
+            if let Err(error) = zonkey_win::run_observe_with_processor(processor) {
+                eprintln!("ZonKey diagnostic observe failed: {error}");
+                std::process::exit(1);
+            }
+        }
         _ => {
             println!(
-                "Zonkey: architecture and audit phase; use `observe-hook` or `observe-raw` for the Windows spikes."
+                "Zonkey: architecture and audit phase; use `observe-hook`, `observe-raw`, or `diagnose` for the Windows spikes."
             );
         }
     }

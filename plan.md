@@ -347,6 +347,19 @@ future Windows runtime work is not mistaken for an existing implementation.
 - Notepad/browser test; edit plan + undo.
 - Observe-only và manual enable flag.
 
+#### M3B-01 - Real-input diagnostic decision pipeline - IN PROGRESS
+
+- `diagnose` feeds the existing Windows observe source into a stateful,
+  platform-neutral Telex/detection/policy diagnostic processor.
+- Only semantic key-down events in the bounded A-Z/digit/basic-boundary scope
+  mutate token state. Key-up, shortcuts, injected events, unsupported keys,
+  and discontinuities are ignored or reset conservatively.
+- Diagnostics are sanitized and observation-only; no edit plan is executed,
+  no user text is changed, and `--show-token` is an explicit temporary debug
+  flag. Native capture remains unaware of dictionaries and policy.
+
+This milestone remains in progress pending owner Windows diagnostic evidence.
+
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
 
