@@ -384,6 +384,30 @@ pub fn validate_restore_plan(plan: Option<&RestorePlan>) -> PlanEligibility {
     PlanEligibility::EligibleForFutureExecutionConsideration
 }
 
+/// Immutable capture-time snapshot of an eligible simulation plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestorePlanHandoff {
+    /// Rendered token captured from the current plan.
+    pub rendered_token: String,
+    /// Replacement token captured from the current plan.
+    pub replacement_token: String,
+    /// Rendered span length in Unicode scalar values.
+    pub rendered_units_to_replace: usize,
+    /// Replacement length in Unicode scalar values.
+    pub replacement_units: usize,
+    /// Policy evidence captured with the plan.
+    pub reason: zonkey_types::DecisionReason,
+    simulation_only: bool,
+}
+
+impl RestorePlanHandoff {
+    /// Returns true to make the non-execution boundary explicit.
+    #[must_use]
+    pub const fn simulation_only(&self) -> bool {
+        self.simulation_only
+    }
+}
+
 /// Stateful, observe-only bridge from validated events to M1/M2 decisions.
 ///
 /// This processor reports only sanitized decision categories. It never
@@ -471,6 +495,29 @@ impl DiagnosticDecisionProcessor {
     #[must_use]
     pub fn plan_eligibility(&self) -> PlanEligibility {
         validate_restore_plan(self.last_restore_plan())
+    }
+
+    /// Captures the current eligible plan as an owned historical snapshot.
+    ///
+    /// The returned value is not linked to processor state and cannot be
+    /// presented back as current by this API.
+    #[must_use]
+    pub fn current_restore_handoff(&self) -> Option<RestorePlanHandoff> {
+        if !matches!(
+            self.plan_eligibility(),
+            PlanEligibility::EligibleForFutureExecutionConsideration
+        ) {
+            return None;
+        }
+        let plan = self.last_restore_plan.as_ref()?;
+        Some(RestorePlanHandoff {
+            rendered_token: plan.rendered_token.clone(),
+            replacement_token: plan.replacement_token.clone(),
+            rendered_units_to_replace: plan.rendered_units_to_replace,
+            replacement_units: plan.replacement_units,
+            reason: plan.reason.clone(),
+            simulation_only: true,
+        })
     }
 
     fn reset_token(&mut self) {
@@ -1232,6 +1279,90 @@ mod tests {
             validate_restore_plan(Some(&malformed)),
             PlanEligibility::Ineligible(PlanIneligibilityReason::InternalSpanInconsistent)
         );
+    }
+
+    #[test]
+    fn eligible_plan_creates_immutable_handoff_snapshot() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        let handoff = processor
+            .current_restore_handoff()
+            .expect("eligible plan has a handoff");
+        assert_eq!(handoff.replacement_token, "resume");
+        assert_eq!(handoff.rendered_units_to_replace, 5);
+        assert_eq!(handoff.replacement_units, 6);
+        assert!(handoff.simulation_only());
+
+        processor.process(&key_event(
+            8,
+            ObservedKey::letter('h').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(processor.current_restore_handoff(), None);
+        assert_eq!(handoff.replacement_token, "resume");
+    }
+
+    #[test]
+    fn new_candidate_has_a_new_current_handoff() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut first = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            first.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        first.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        let handoff_a = first.current_restore_handoff().unwrap();
+
+        let mut second = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'c'), (2, 'o'), (3, 'n'), (4, 'f'), (5, 'i'), (6, 'g')] {
+            second.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        second.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        let handoff_b = second.current_restore_handoff().unwrap();
+        assert_eq!(handoff_a.replacement_token, "resume");
+        assert_eq!(handoff_b.replacement_token, "config");
+        assert_ne!(handoff_a, handoff_b);
     }
 
     #[test]

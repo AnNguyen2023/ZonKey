@@ -446,6 +446,17 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
   dropped=0, processed=16, discontinuities=0, source_failures=0,
   unsupported_events=0.
 
+#### M3C-04 - Restore-plan handoff contract - DONE
+
+- Capture an eligible current plan as an immutable, platform-neutral
+  simulation snapshot; stale snapshots remain historical only after service
+  invalidation or replacement.
+- No generation, revalidation, round-trip execution, Windows consumer, or
+  OS/editor inspection is introduced. See ADR 0012.
+- Deterministic tests prove capture-time eligibility, stale-after-invalidation
+  snapshot semantics, and replacement by a newer candidate; no manual CLI
+  validation is required.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

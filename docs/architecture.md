@@ -287,6 +287,19 @@ new RestoreCandidate plan. Runtime counters were received=56, accepted=56,
 dropped=0, processed=56, discontinuities=0, source_failures=0,
 unsupported_events=0. No text modification occurred.
 
+### M3C-04 restore-plan handoff contract - DONE
+
+`zonkey-service` can capture an eligible current plan as an owned immutable
+`RestorePlanHandoff` snapshot. The snapshot carries only sanitized,
+platform-neutral plan data and capture-time eligibility; it is not linked back
+to mutable service state and cannot be presented back as current. No identity,
+revalidation, execution API, Windows consumer, or foreground validation is
+introduced.
+Deterministic tests confirm eligible capture, immutable historical snapshots
+after invalidation, absence of a current handoff after semantic changes, and
+replacement by a newer candidate. No CLI-specific handoff diagnostics or OS
+behavior are involved.
+
 ### M3C-03 restore-plan precondition model - DONE
 
 `zonkey-service` provides fail-closed `PlanEligibility` validation for the
