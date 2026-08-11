@@ -380,6 +380,16 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
 - No detector, dictionary, Telex, policy, threshold, or runtime behavior was
   changed. The milestone records product expectations without broad tuning.
 
+#### M3B-04 - Conservative structured-token corpus coverage - DONE
+
+- Reviewed active never-transform coverage for URLs, domains, Windows and
+  Unix paths, IP literals, command options, identifiers, versions, UUIDs,
+  hashes, and secret-like tokens.
+- Coverage is sufficient for the existing detector semantics; no fixture gap
+  justified adding another active case. Active corpus remains 356 and the 69
+  planned structured-token fixtures remain inactive.
+- No detector, policy, Telex, dictionary, Windows, or runtime behavior changed.
+
 The M3A-04 observe-source spike is present, but production Windows runtime
 observation, input modification, and injection remain out of scope.
 

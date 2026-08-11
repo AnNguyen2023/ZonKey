@@ -225,6 +225,15 @@ capability is changed by M3B-02/M3B-03. Recovery candidate evidence requires
 an observed transformation or mutation signal; dictionary membership alone is
 insufficient for an unchanged token.
 
+### M3B-04 conservative structured-token corpus coverage - DONE
+
+Active never-transform fixtures already cover the high-risk structured-token
+shapes represented by the current detector: URLs, domains, Windows and Unix
+paths, command options, identifiers, IP literals, versions, UUIDs, hashes, and
+secret-like values. The active corpus remains at 356 fixtures and the 69
+planned structured-token cases remain inactive. No additional fixture was
+necessary and no runtime or decision behavior changed.
+
 Zonkey là Rust workspace Windows-first nhưng phần lõi M1 hoàn toàn độc lập nền
 tảng. M1 chỉ tạo quyết định và `EditPlan`; nó không phải IME cho người dùng cuối.
 
