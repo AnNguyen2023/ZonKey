@@ -457,6 +457,16 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
   snapshot semantics, and replacement by a newer candidate; no manual CLI
   validation is required.
 
+#### M3C-05 - Handoff revalidation model - DONE
+
+- Compare captured handoffs with current service state using a deterministic
+  service-local generation; identical-content stale snapshots are rejected.
+- Current/Stale is simulation metadata only. No OS/editor verification,
+  execution, or persistence is introduced. See ADR 0013.
+- Generation is service-local `u64`, starts at 1, increments only for new
+  RestoreCandidate plans, and uses checked allocation that fails closed
+  rather than wrapping or reusing identity.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

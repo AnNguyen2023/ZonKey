@@ -334,6 +334,7 @@ pub struct RestorePlan {
     pub reason: zonkey_types::DecisionReason,
     /// Always false; execution belongs to a separately approved milestone.
     execution_allowed: bool,
+    generation: u64,
 }
 
 impl RestorePlan {
@@ -341,6 +342,12 @@ impl RestorePlan {
     #[must_use]
     pub const fn execution_allowed(&self) -> bool {
         self.execution_allowed
+    }
+
+    /// Returns the service-local identity captured for this plan.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
@@ -397,6 +404,8 @@ pub struct RestorePlanHandoff {
     pub replacement_units: usize,
     /// Policy evidence captured with the plan.
     pub reason: zonkey_types::DecisionReason,
+    /// Service-local plan identity at capture time.
+    pub generation: u64,
     simulation_only: bool,
 }
 
@@ -406,6 +415,23 @@ impl RestorePlanHandoff {
     pub const fn simulation_only(&self) -> bool {
         self.simulation_only
     }
+}
+
+/// Result of comparing a captured handoff with current service state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HandoffRevalidation {
+    /// The handoff still matches the current logical plan.
+    Current,
+    /// The handoff is not current for a service-owned reason.
+    Stale(HandoffStaleReason),
+}
+
+/// Fail-closed reasons for service-local handoff revalidation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffStaleReason {
+    NoCurrentPlan,
+    DifferentGeneration,
+    MalformedSnapshot,
 }
 
 /// Stateful, observe-only bridge from validated events to M1/M2 decisions.
@@ -429,6 +455,7 @@ pub struct DiagnosticDecisionProcessor {
     last_token_lengths: Option<(usize, usize)>,
     last_decision: Option<DiagnosticDecision>,
     last_restore_plan: Option<RestorePlan>,
+    next_plan_generation: Option<u64>,
 }
 
 impl DiagnosticDecisionProcessor {
@@ -451,6 +478,7 @@ impl DiagnosticDecisionProcessor {
             last_token_lengths: None,
             last_decision: None,
             last_restore_plan: None,
+            next_plan_generation: Some(1),
         }
     }
 
@@ -516,12 +544,51 @@ impl DiagnosticDecisionProcessor {
             rendered_units_to_replace: plan.rendered_units_to_replace,
             replacement_units: plan.replacement_units,
             reason: plan.reason.clone(),
+            generation: plan.generation(),
             simulation_only: true,
         })
     }
 
+    /// Revalidates a captured handoff against only current service state.
+    #[must_use]
+    pub fn revalidate_restore_handoff(&self, handoff: &RestorePlanHandoff) -> HandoffRevalidation {
+        let Some(plan) = self.last_restore_plan.as_ref() else {
+            return HandoffRevalidation::Stale(HandoffStaleReason::NoCurrentPlan);
+        };
+        if !handoff.simulation_only
+            || handoff.rendered_token.is_empty()
+            || handoff.replacement_token.is_empty()
+            || handoff.rendered_units_to_replace != handoff.rendered_token.chars().count()
+            || handoff.replacement_units != handoff.replacement_token.chars().count()
+        {
+            return HandoffRevalidation::Stale(HandoffStaleReason::MalformedSnapshot);
+        }
+        if !matches!(
+            self.plan_eligibility(),
+            PlanEligibility::EligibleForFutureExecutionConsideration
+        ) {
+            return HandoffRevalidation::Stale(HandoffStaleReason::NoCurrentPlan);
+        }
+        if handoff.generation != plan.generation()
+            || handoff.rendered_token != plan.rendered_token
+            || handoff.replacement_token != plan.replacement_token
+            || handoff.rendered_units_to_replace != plan.rendered_units_to_replace
+            || handoff.replacement_units != plan.replacement_units
+            || handoff.reason != plan.reason
+        {
+            return HandoffRevalidation::Stale(HandoffStaleReason::DifferentGeneration);
+        }
+        HandoffRevalidation::Current
+    }
+
     fn reset_token(&mut self) {
         self.telex = TelexEngine::new();
+    }
+
+    fn allocate_plan_generation(&mut self) -> Option<u64> {
+        let generation = self.next_plan_generation?;
+        self.next_plan_generation = generation.checked_add(1);
+        Some(generation)
     }
 
     fn invalidate_restore_plan(&mut self) {
@@ -577,6 +644,12 @@ impl DiagnosticDecisionProcessor {
             .decide(evidence.clone(), self.context, &rendered);
         let decision = match outcome.decision {
             zonkey_types::RecoveryDecision::RestoreEnglish { text, reason, .. } => {
+                let Some(generation) = self.allocate_plan_generation() else {
+                    self.last_restore_plan = None;
+                    self.last_decision = Some(DiagnosticDecision::Ambiguous);
+                    let _ = self.telex.process(EngineEvent::Boundary(boundary));
+                    return ProcessorClassification::BoundaryObserved;
+                };
                 self.last_restore_plan = Some(RestorePlan {
                     original_token: raw.clone(),
                     rendered_token: rendered.clone(),
@@ -585,6 +658,7 @@ impl DiagnosticDecisionProcessor {
                     replacement_units: text.chars().count(),
                     reason,
                     execution_allowed: false,
+                    generation,
                 });
                 DiagnosticDecision::RestoreCandidate
             }
@@ -1308,6 +1382,16 @@ mod tests {
         assert_eq!(handoff.rendered_units_to_replace, 5);
         assert_eq!(handoff.replacement_units, 6);
         assert!(handoff.simulation_only());
+        assert_eq!(
+            processor.revalidate_restore_handoff(&handoff),
+            HandoffRevalidation::Current
+        );
+        let mut malformed = handoff.clone();
+        malformed.rendered_token.push('x');
+        assert_eq!(
+            processor.revalidate_restore_handoff(&malformed),
+            HandoffRevalidation::Stale(HandoffStaleReason::MalformedSnapshot)
+        );
 
         processor.process(&key_event(
             8,
@@ -1317,6 +1401,10 @@ mod tests {
             physical,
         ));
         assert_eq!(processor.current_restore_handoff(), None);
+        assert_eq!(
+            processor.revalidate_restore_handoff(&handoff),
+            HandoffRevalidation::Stale(HandoffStaleReason::NoCurrentPlan)
+        );
         assert_eq!(handoff.replacement_token, "resume");
     }
 
@@ -1363,6 +1451,83 @@ mod tests {
         assert_eq!(handoff_a.replacement_token, "resume");
         assert_eq!(handoff_b.replacement_token, "config");
         assert_ne!(handoff_a, handoff_b);
+    }
+
+    #[test]
+    fn same_content_after_invalidation_has_new_generation() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        let handoff_a = processor.current_restore_handoff().unwrap();
+        let generation_a = handoff_a.generation;
+
+        processor.process(&key_event(
+            8,
+            ObservedKey::letter('h').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(
+            processor.revalidate_restore_handoff(&handoff_a),
+            HandoffRevalidation::Stale(HandoffStaleReason::NoCurrentPlan)
+        );
+        processor.process(&key_event(
+            9,
+            ObservedKey::escape(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+
+        for (sequence, character) in [
+            (10, 'r'),
+            (11, 'e'),
+            (12, 's'),
+            (13, 'u'),
+            (14, 'm'),
+            (15, 'e'),
+        ] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            16,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        let handoff_b = processor.current_restore_handoff().unwrap();
+        assert!(handoff_b.generation > generation_a);
+        assert_eq!(
+            processor.revalidate_restore_handoff(&handoff_b),
+            HandoffRevalidation::Current
+        );
+        assert_eq!(
+            processor.revalidate_restore_handoff(&handoff_a),
+            HandoffRevalidation::Stale(HandoffStaleReason::DifferentGeneration)
+        );
     }
 
     #[test]

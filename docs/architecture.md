@@ -300,6 +300,18 @@ after invalidation, absence of a current handoff after semantic changes, and
 replacement by a newer candidate. No CLI-specific handoff diagnostics or OS
 behavior are involved.
 
+### M3C-05 handoff revalidation model - DONE
+
+`zonkey-service` compares a captured handoff with current service state using
+a service-local monotonic generation and returns fail-closed Current/Stale
+metadata. Generation distinguishes identical-content decisions after
+invalidation; it is not persistent or OS identity. Revalidation never checks
+foreground/editor state and adds no execution capability.
+Deterministic tests cover no-current-plan, malformed snapshots, generation
+mismatch, matching current generation, and identical-content plans recreated
+after invalidation. Checked allocation fails closed at `u64::MAX`; no
+generation wrapping or reuse occurs.
+
 ### M3C-03 restore-plan precondition model - DONE
 
 `zonkey-service` provides fail-closed `PlanEligibility` validation for the
