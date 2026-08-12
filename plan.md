@@ -488,8 +488,20 @@ rather than wrapping or reusing identity.
 - Specifies WHAT a future adapter must prove, not HOW; no OS/editor
   acquisition or mutation is implemented. Owner accepted the exact-match,
   fail-closed, unresolved-operation-unit, logical-freshness, and race
-  requirements. M3C-08 is proposed for design-only acquisition review. See
+  requirements. M3C-09 is proposed for design-only controlled-test-surface
+  design. See
   ADR 0015.
+
+#### M3C-08 - External evidence acquisition architecture review - DONE
+
+- Design-only comparison of UI Automation/accessibility, TSF, application-
+  specific adapters, and a controlled synthetic test surface.
+- Reviews exact text/caret binding, identity, composition, secure/session
+  evidence, operation units, freshness, atomicity, privilege, and compatibility.
+- Recommendation C is a controlled test-surface design before OS acquisition;
+  it is test infrastructure, not a production adapter. No Windows API,
+  inspection, mutation, or dependency is selected; atomicity and production
+  evidence remain unresolved. See ADR 0016.
 
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 

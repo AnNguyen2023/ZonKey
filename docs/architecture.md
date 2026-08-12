@@ -329,8 +329,17 @@ This documentation-only boundary specifies required target, caret, identity,
 composition, secure/session, operation-unit, freshness, and atomicity
 evidence. Owner acceptance records exact matching, fail-closed unknowns,
 unresolved operation units, logical freshness, and the unresolved race.
-No acquisition mechanism or OS/editor inspection has been selected; M3C-08
-is proposed for design-only acquisition review.
+No acquisition mechanism or OS/editor inspection has been selected; M3C-09
+is proposed for design-only controlled-test-surface design.
+
+### M3C-08 external-acquisition architecture review - DONE
+
+ADR 0016 compares UI Automation/accessibility providers, TSF, application-
+specific adapters, and a controlled synthetic surface. No family is proven to
+close the exact-text/caret race generically. The recommendation is to design
+a controlled test surface before any OS acquisition experiment; no Windows API
+or implementation is selected. Owner accepted recommendation C; production
+acquisition remains deferred and atomicity remains unresolved.
 
 ### M3C-03 restore-plan precondition model - DONE
 
