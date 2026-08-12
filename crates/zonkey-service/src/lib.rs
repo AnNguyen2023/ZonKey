@@ -434,6 +434,27 @@ pub enum HandoffStaleReason {
     MalformedSnapshot,
 }
 
+/// Service-side gate result; passing only permits a future external
+/// validation stage and never authorizes mutation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InternalExecutionGate {
+    PassedForExternalValidation,
+    Rejected(InternalGateRejection),
+}
+
+/// Fail-closed reasons derived from existing service contracts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InternalGateRejection {
+    NoCurrentPlan,
+    PlanIneligible,
+    NoCurrentHandoff,
+    HandoffStale,
+    HandoffMalformed,
+    GenerationMismatch,
+    InternalSpanInconsistent,
+    SimulationInvariantBroken,
+}
+
 /// Stateful, observe-only bridge from validated events to M1/M2 decisions.
 ///
 /// This processor reports only sanitized decision categories. It never
@@ -579,6 +600,47 @@ impl DiagnosticDecisionProcessor {
             return HandoffRevalidation::Stale(HandoffStaleReason::DifferentGeneration);
         }
         HandoffRevalidation::Current
+    }
+
+    /// Composes current plan eligibility and handoff revalidation. A pass is
+    /// only a stop at the boundary before future external validation.
+    #[must_use]
+    pub fn evaluate_internal_execution_gate(
+        &self,
+        handoff: &RestorePlanHandoff,
+    ) -> InternalExecutionGate {
+        if !matches!(
+            self.plan_eligibility(),
+            PlanEligibility::EligibleForFutureExecutionConsideration
+        ) {
+            return InternalExecutionGate::Rejected(InternalGateRejection::PlanIneligible);
+        }
+        let Some(current) = self.current_restore_handoff() else {
+            return InternalExecutionGate::Rejected(InternalGateRejection::NoCurrentHandoff);
+        };
+        if !handoff.simulation_only() {
+            return InternalExecutionGate::Rejected(
+                InternalGateRejection::SimulationInvariantBroken,
+            );
+        }
+        match self.revalidate_restore_handoff(handoff) {
+            HandoffRevalidation::Current => {
+                if current.generation == handoff.generation {
+                    InternalExecutionGate::PassedForExternalValidation
+                } else {
+                    InternalExecutionGate::Rejected(InternalGateRejection::GenerationMismatch)
+                }
+            }
+            HandoffRevalidation::Stale(HandoffStaleReason::NoCurrentPlan) => {
+                InternalExecutionGate::Rejected(InternalGateRejection::NoCurrentPlan)
+            }
+            HandoffRevalidation::Stale(HandoffStaleReason::DifferentGeneration) => {
+                InternalExecutionGate::Rejected(InternalGateRejection::GenerationMismatch)
+            }
+            HandoffRevalidation::Stale(HandoffStaleReason::MalformedSnapshot) => {
+                InternalExecutionGate::Rejected(InternalGateRejection::HandoffMalformed)
+            }
+        }
     }
 
     fn reset_token(&mut self) {
@@ -1527,6 +1589,61 @@ mod tests {
         assert_eq!(
             processor.revalidate_restore_handoff(&handoff_a),
             HandoffRevalidation::Stale(HandoffStaleReason::DifferentGeneration)
+        );
+    }
+
+    #[test]
+    fn internal_gate_composes_current_evidence_and_rejects_stale() {
+        let physical = zonkey_types::InjectionOrigin::PhysicalOrUnmarked;
+        let mut processor = DiagnosticDecisionProcessor::default();
+        for (sequence, character) in [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')] {
+            processor.process(&key_event(
+                sequence,
+                ObservedKey::letter(character).unwrap(),
+                KeyEventKind::KeyDown,
+                ModifierState::new(),
+                physical,
+            ));
+        }
+        processor.process(&key_event(
+            7,
+            ObservedKey::space(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        let handoff = processor.current_restore_handoff().unwrap();
+        assert_eq!(
+            processor.evaluate_internal_execution_gate(&handoff),
+            InternalExecutionGate::PassedForExternalValidation
+        );
+        processor.process(&key_event(
+            8,
+            ObservedKey::letter('h').unwrap(),
+            KeyEventKind::KeyDown,
+            ModifierState::new(),
+            physical,
+        ));
+        assert_eq!(
+            processor.evaluate_internal_execution_gate(&handoff),
+            InternalExecutionGate::Rejected(InternalGateRejection::PlanIneligible)
+        );
+    }
+
+    #[test]
+    fn internal_gate_rejects_no_plan_and_malformed_handoff() {
+        let processor = DiagnosticDecisionProcessor::default();
+        assert_eq!(
+            processor.evaluate_internal_execution_gate(&RestorePlanHandoff {
+                rendered_token: String::new(),
+                replacement_token: String::new(),
+                rendered_units_to_replace: 0,
+                replacement_units: 0,
+                reason: zonkey_types::DecisionReason::ExactEnglishDictionary,
+                generation: 0,
+                simulation_only: true,
+            }),
+            InternalExecutionGate::Rejected(InternalGateRejection::PlanIneligible)
         );
     }
 

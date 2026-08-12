@@ -312,6 +312,17 @@ mismatch, matching current generation, and identical-content plans recreated
 after invalidation. Checked allocation fails closed at `u64::MAX`; no
 generation wrapping or reuse occurs.
 
+### M3C-06 internal execution gate - IN PROGRESS
+
+The service-side gate composes current plan eligibility, current handoff
+capture, and revalidation. `PassedForExternalValidation` only permits a future
+external-validation stage; it does not authorize or execute editing. External
+editor/foreground state and observation-to-mutation races remain unknown.
+The gate is read-only, non-consuming, and non-persistent. Some rejection
+labels are boundary vocabulary for composed lower-level failures even when a
+specific path is currently collapsed by existing validators. A pass never
+closes the race between last observation and any future mutation attempt.
+
 ### M3C-03 restore-plan precondition model - DONE
 
 `zonkey-service` provides fail-closed `PlanEligibility` validation for the

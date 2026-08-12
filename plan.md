@@ -465,7 +465,21 @@ This milestone remains in progress pending owner Windows diagnostic evidence.
   execution, or persistence is introduced. See ADR 0013.
 - Generation is service-local `u64`, starts at 1, increments only for new
   RestoreCandidate plans, and uses checked allocation that fails closed
-  rather than wrapping or reusing identity.
+rather than wrapping or reusing identity.
+
+#### M3C-06 - Internal execution-gate contract design - DONE
+
+- Compose current plan, eligibility, handoff, and revalidation into a
+  fail-closed service-side gate that stops before external validation.
+- PASS never means executable or safe-to-edit; foreground/editor evidence,
+  secure state, operation units, and observation races remain unknown. See
+  ADR 0014.
+
+- Owner accepted the service-side composition of plan eligibility, handoff,
+  revalidation, generation, span, and simulation-only evidence.
+- `PassedForExternalValidation` stops before external validation and never
+  authorizes mutation; external requirements and observation races remain
+  unknown. Deterministic service tests cover pass and fail-closed rejection.
 
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
