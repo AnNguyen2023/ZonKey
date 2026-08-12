@@ -323,6 +323,15 @@ labels are boundary vocabulary for composed lower-level failures even when a
 specific path is currently collapsed by existing validators. A pass never
 closes the race between last observation and any future mutation attempt.
 
+### M3C-07 external-validation requirements - DONE
+
+This documentation-only boundary specifies required target, caret, identity,
+composition, secure/session, operation-unit, freshness, and atomicity
+evidence. Owner acceptance records exact matching, fail-closed unknowns,
+unresolved operation units, logical freshness, and the unresolved race.
+No acquisition mechanism or OS/editor inspection has been selected; M3C-08
+is proposed for design-only acquisition review.
+
 ### M3C-03 restore-plan precondition model - DONE
 
 `zonkey-service` provides fail-closed `PlanEligibility` validation for the

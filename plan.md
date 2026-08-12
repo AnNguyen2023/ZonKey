@@ -481,6 +481,16 @@ rather than wrapping or reusing identity.
   authorizes mutation; external requirements and observation races remain
   unknown. Deterministic service tests cover pass and fail-closed rejection.
 
+#### M3C-07 - External-validation requirements specification - DONE
+
+- Documentation-only definition of required external evidence, unknown/veto
+  semantics, freshness, operation units, and race control.
+- Specifies WHAT a future adapter must prove, not HOW; no OS/editor
+  acquisition or mutation is implemented. Owner accepted the exact-match,
+  fail-closed, unresolved-operation-unit, logical-freshness, and race
+  requirements. M3C-08 is proposed for design-only acquisition review. See
+  ADR 0015.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
