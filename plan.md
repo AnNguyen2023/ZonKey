@@ -503,6 +503,17 @@ rather than wrapping or reusing identity.
   inspection, mutation, or dependency is selected; atomicity and production
   evidence remain unresolved. See ADR 0016.
 
+#### M3C-09 - Controlled external-validation test-surface design - DONE
+
+- Design-only contract for a ZonKey-owned deterministic surface: exact text,
+  abstract TextUnit coordinates, caret/selection, logical identity,
+  composition, secure/session state, checked revision snapshots, and race
+  injection.
+- Defines a test-only compare-and-replace oracle and fail-closed rejection
+  vocabulary. It does not prove production safety and adds no implementation,
+  OS inspection, mutation, or dependency. Owner accepted the design; M3C-10
+  is proposed for test-only platform-neutral implementation. See ADR 0017.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

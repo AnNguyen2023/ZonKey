@@ -341,6 +341,16 @@ a controlled test surface before any OS acquisition experiment; no Windows API
 or implementation is selected. Owner accepted recommendation C; production
 acquisition remains deferred and atomicity remains unresolved.
 
+### M3C-09 controlled external-validation test-surface design - DONE
+
+ADR 0017 defines a deterministic platform-neutral surface with explicit text,
+TextUnit coordinates, caret/selection, logical identity, composition,
+secure/session state, checked revisions, immutable evidence snapshots, and a
+compare-and-replace race oracle. It is test infrastructure only and is not
+evidence that production editors or acquisition APIs are safe. No
+implementation has been added. Owner accepted the design; M3C-10 is proposed
+for test-only platform-neutral implementation.
+
 ### M3C-03 restore-plan precondition model - DONE
 
 `zonkey-service` provides fail-closed `PlanEligibility` validation for the
