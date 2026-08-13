@@ -524,6 +524,17 @@ rather than wrapping or reusing identity.
 - M3C controlled-model phase is COMPLETE; production acquisition and execution
   are not approved or implemented.
 
+#### M3D-01 - Production acquisition readiness review - DONE
+
+- Readiness-only selection of at most one target class and acquisition family:
+  standard Win32 edit controls plus the UI Automation/accessibility provider
+  family, excluding secure/password fields.
+- Defines exact evidence to observe, unknown/fail-closed states, freshness and
+  race limits, privilege/compatibility boundaries, and explicit stop conditions.
+  No OS API, inspection, mutation, or dependency is implemented. Owner
+  approved readiness only; production editing remains out of scope. See ADR
+  0018.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

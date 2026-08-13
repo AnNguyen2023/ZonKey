@@ -363,6 +363,15 @@ eligibility, handoff, revalidation, gates, external requirements, acquisition
 architecture, design, and deterministic implementation are finished. Production
 execution and acquisition remain out of scope.
 
+### M3D-01 production acquisition readiness - DONE
+
+ADR 0018 selects one design-only candidate for a future observe-only spike:
+standard Win32 edit controls with a UI Automation/accessibility text-provider
+family. The candidate is partial and fail-closed; composition, secure/session,
+operation units, coherence, and atomicity remain unresolved. No API call or
+production adapter is implemented. Owner approved readiness only; production
+editing and acquisition implementation remain out of scope.
+
 ### M3C-03 restore-plan precondition model - DONE
 
 `zonkey-service` provides fail-closed `PlanEligibility` validation for the
