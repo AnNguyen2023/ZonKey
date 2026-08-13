@@ -512,7 +512,17 @@ rather than wrapping or reusing identity.
 - Defines a test-only compare-and-replace oracle and fail-closed rejection
   vocabulary. It does not prove production safety and adds no implementation,
   OS inspection, mutation, or dependency. Owner accepted the design; M3C-10
-  is proposed for test-only platform-neutral implementation. See ADR 0017.
+  completed the test-only platform-neutral implementation. See ADR 0017.
+
+#### M3C-10 - Controlled validation surface implementation - DONE
+
+- Implement the approved surface as `#[cfg(test)]` infrastructure in
+  `zonkey-service`, with deterministic state, snapshots, race injection, and
+  compare-and-replace tests.
+- Keep TextUnit distinct from byte/scalar assumptions and preserve production
+  non-equivalence. No OS/editor acquisition or mutation is included.
+- M3C controlled-model phase is COMPLETE; production acquisition and execution
+  are not approved or implemented.
 
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 

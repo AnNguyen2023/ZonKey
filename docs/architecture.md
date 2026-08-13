@@ -348,8 +348,20 @@ TextUnit coordinates, caret/selection, logical identity, composition,
 secure/session state, checked revisions, immutable evidence snapshots, and a
 compare-and-replace race oracle. It is test infrastructure only and is not
 evidence that production editors or acquisition APIs are safe. No
-implementation has been added. Owner accepted the design; M3C-10 is proposed
-for test-only platform-neutral implementation.
+implementation has been added. Owner accepted the design; M3C-10 completed the
+test-only platform-neutral implementation.
+
+### M3C-10 controlled validation surface implementation - DONE
+
+`zonkey-service` now contains a `#[cfg(test)]` controlled surface with explicit
+TextUnit coordinates, immutable evidence snapshots, checked revisions, race
+mutations, and a deterministic compare-and-replace oracle. Tests bind a real
+service RestorePlanHandoff to the in-memory model. This is test-only
+infrastructure; it does not provide production editor evidence or mutation.
+The M3C controlled-model phase is COMPLETE: internal planning, lifecycle,
+eligibility, handoff, revalidation, gates, external requirements, acquisition
+architecture, design, and deterministic implementation are finished. Production
+execution and acquisition remain out of scope.
 
 ### M3C-03 restore-plan precondition model - DONE
 

@@ -864,6 +864,462 @@ impl EventProcessor for DiagnosticDecisionProcessor {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
+mod controlled_surface {
+    use super::RestorePlanHandoff;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct TextUnit(u32);
+
+    impl TextUnit {
+        pub(super) const fn new(value: u32) -> Self {
+            Self(value)
+        }
+        pub(super) const fn get(self) -> u32 {
+            self.0
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) struct SurfaceId(u64);
+
+    impl SurfaceId {
+        pub(super) const fn new(value: u64) -> Self {
+            Self(value)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum SelectionState {
+        None,
+        Range { start: TextUnit, end: TextUnit },
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum CompositionState {
+        Inactive,
+        Active,
+        Unknown,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum SecureState {
+        KnownNonSecure,
+        Secure,
+        Unknown,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum SessionState {
+        SupportedLocal,
+        UnsupportedRemote,
+        Unknown,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum ControlledValidationError {
+        TargetIdentityMismatch,
+        RevisionMismatch,
+        TextMismatch,
+        CaretMismatch,
+        SelectionNotEmpty,
+        CompositionActive,
+        CompositionUnknown,
+        SecureTarget,
+        SecureUnknown,
+        UnsupportedSession,
+        SessionUnknown,
+        OperationUnitsUnproven,
+        RangeInvalid,
+        RevisionOverflow,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) struct ControlledEvidenceSnapshot {
+        pub(super) surface_id: SurfaceId,
+        pub(super) revision: u64,
+        pub(super) text: String,
+        pub(super) range: (TextUnit, TextUnit),
+        pub(super) caret: TextUnit,
+        pub(super) selection: SelectionState,
+        pub(super) operation_units_proven: bool,
+        pub(super) composition: CompositionState,
+        pub(super) secure: SecureState,
+        pub(super) session: SessionState,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) struct ControlledSurface {
+        surface_id: SurfaceId,
+        text: String,
+        caret: TextUnit,
+        selection: SelectionState,
+        operation_units_proven: bool,
+        composition: CompositionState,
+        secure: SecureState,
+        session: SessionState,
+        revision: u64,
+    }
+
+    impl ControlledSurface {
+        pub(super) fn new(surface_id: SurfaceId, text: impl Into<String>) -> Self {
+            Self {
+                surface_id,
+                text: text.into(),
+                caret: TextUnit::new(0),
+                selection: SelectionState::None,
+                operation_units_proven: true,
+                composition: CompositionState::Inactive,
+                secure: SecureState::KnownNonSecure,
+                session: SessionState::SupportedLocal,
+                revision: 1,
+            }
+        }
+        fn units(&self) -> u32 {
+            self.text.chars().count().try_into().unwrap_or(u32::MAX)
+        }
+        fn bump(&mut self) -> Result<(), ControlledValidationError> {
+            self.revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(ControlledValidationError::RevisionOverflow)?;
+            Ok(())
+        }
+        pub(super) fn text(&self) -> &str {
+            &self.text
+        }
+        pub(super) fn revision(&self) -> u64 {
+            self.revision
+        }
+        pub(super) fn set_caret(
+            &mut self,
+            caret: TextUnit,
+        ) -> Result<(), ControlledValidationError> {
+            if caret.get() > self.units() {
+                return Err(ControlledValidationError::RangeInvalid);
+            }
+            self.bump()?;
+            self.caret = caret;
+            self.selection = SelectionState::None;
+            Ok(())
+        }
+        pub(super) fn set_selection(
+            &mut self,
+            selection: SelectionState,
+        ) -> Result<(), ControlledValidationError> {
+            if let SelectionState::Range { start, end } = selection
+                && (start.get() > end.get() || end.get() > self.units())
+            {
+                return Err(ControlledValidationError::RangeInvalid);
+            }
+            self.bump()?;
+            self.selection = selection;
+            Ok(())
+        }
+        pub(super) fn replace_text(
+            &mut self,
+            text: impl Into<String>,
+        ) -> Result<(), ControlledValidationError> {
+            self.bump()?;
+            self.text = text.into();
+            if self.caret.get() > self.units() {
+                self.caret = TextUnit::new(self.units());
+            }
+            self.selection = SelectionState::None;
+            Ok(())
+        }
+        pub(super) fn set_surface_id(
+            &mut self,
+            id: SurfaceId,
+        ) -> Result<(), ControlledValidationError> {
+            self.bump()?;
+            self.surface_id = id;
+            Ok(())
+        }
+        pub(super) fn set_composition(
+            &mut self,
+            value: CompositionState,
+        ) -> Result<(), ControlledValidationError> {
+            self.bump()?;
+            self.composition = value;
+            Ok(())
+        }
+        pub(super) fn set_secure(
+            &mut self,
+            value: SecureState,
+        ) -> Result<(), ControlledValidationError> {
+            self.bump()?;
+            self.secure = value;
+            Ok(())
+        }
+        pub(super) fn set_session(
+            &mut self,
+            value: SessionState,
+        ) -> Result<(), ControlledValidationError> {
+            self.bump()?;
+            self.session = value;
+            Ok(())
+        }
+        pub(super) fn set_operation_units_proven(
+            &mut self,
+            value: bool,
+        ) -> Result<(), ControlledValidationError> {
+            self.bump()?;
+            self.operation_units_proven = value;
+            Ok(())
+        }
+        pub(super) fn capture(
+            &self,
+            rendered: &str,
+        ) -> Result<ControlledEvidenceSnapshot, ControlledValidationError> {
+            let length: u32 = rendered
+                .chars()
+                .count()
+                .try_into()
+                .map_err(|_| ControlledValidationError::RangeInvalid)?;
+            if length > self.caret.get() {
+                return Err(ControlledValidationError::RangeInvalid);
+            }
+            let start = TextUnit::new(self.caret.get() - length);
+            let actual: String = self
+                .text
+                .chars()
+                .skip(start.get() as usize)
+                .take(length as usize)
+                .collect();
+            if actual != rendered {
+                return Err(ControlledValidationError::TextMismatch);
+            }
+            Ok(ControlledEvidenceSnapshot {
+                surface_id: self.surface_id,
+                revision: self.revision,
+                text: actual,
+                range: (start, self.caret),
+                caret: self.caret,
+                selection: self.selection,
+                operation_units_proven: self.operation_units_proven,
+                composition: self.composition,
+                secure: self.secure,
+                session: self.session,
+            })
+        }
+        pub(super) fn validate(
+            &self,
+            handoff: &RestorePlanHandoff,
+            snapshot: &ControlledEvidenceSnapshot,
+        ) -> Result<(), ControlledValidationError> {
+            if snapshot.surface_id != self.surface_id {
+                return Err(ControlledValidationError::TargetIdentityMismatch);
+            }
+            if snapshot.revision != self.revision {
+                return Err(ControlledValidationError::RevisionMismatch);
+            }
+            if snapshot.caret != self.caret {
+                return Err(ControlledValidationError::CaretMismatch);
+            }
+            if snapshot.range.1 != self.caret || snapshot.text != handoff.rendered_token {
+                return Err(ControlledValidationError::TextMismatch);
+            }
+            if !matches!(self.selection, SelectionState::None) {
+                return Err(ControlledValidationError::SelectionNotEmpty);
+            }
+            match self.composition {
+                CompositionState::Inactive => {}
+                CompositionState::Active => {
+                    return Err(ControlledValidationError::CompositionActive);
+                }
+                CompositionState::Unknown => {
+                    return Err(ControlledValidationError::CompositionUnknown);
+                }
+            }
+            match self.secure {
+                SecureState::KnownNonSecure => {}
+                SecureState::Secure => return Err(ControlledValidationError::SecureTarget),
+                SecureState::Unknown => return Err(ControlledValidationError::SecureUnknown),
+            }
+            match self.session {
+                SessionState::SupportedLocal => {}
+                SessionState::UnsupportedRemote => {
+                    return Err(ControlledValidationError::UnsupportedSession);
+                }
+                SessionState::Unknown => return Err(ControlledValidationError::SessionUnknown),
+            }
+            if !self.operation_units_proven {
+                return Err(ControlledValidationError::OperationUnitsUnproven);
+            }
+            Ok(())
+        }
+        pub(super) fn compare_revision_and_replace(
+            &mut self,
+            handoff: &RestorePlanHandoff,
+            snapshot: &ControlledEvidenceSnapshot,
+            replacement: &str,
+        ) -> Result<(), ControlledValidationError> {
+            self.validate(handoff, snapshot)?;
+            self.bump()?;
+            let (start, end) = snapshot.range;
+            let chars: Vec<char> = self.text.chars().collect();
+            let mut next = String::new();
+            next.extend(chars[..start.get() as usize].iter());
+            next.push_str(replacement);
+            next.extend(chars[end.get() as usize..].iter());
+            self.text = next;
+            let replacement_units = u32::try_from(replacement.chars().count())
+                .map_err(|_| ControlledValidationError::RangeInvalid)?;
+            self.caret = TextUnit::new(
+                start
+                    .get()
+                    .checked_add(replacement_units)
+                    .ok_or(ControlledValidationError::RangeInvalid)?,
+            );
+            self.selection = SelectionState::None;
+            Ok(())
+        }
+        #[cfg(test)]
+        pub(super) fn set_revision_for_test(&mut self, revision: u64) {
+            self.revision = revision;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::{DiagnosticDecisionProcessor, EventProcessor};
+        use zonkey_types::{
+            EventSequence, InjectionOrigin, KeyEventKind, ModifierState, ObservedInputEvent,
+            ObservedKey,
+        };
+        fn handoff(rendered: &str) -> RestorePlanHandoff {
+            RestorePlanHandoff {
+                rendered_token: rendered.into(),
+                replacement_token: "resume".into(),
+                rendered_units_to_replace: rendered.chars().count(),
+                replacement_units: 6,
+                reason: zonkey_types::DecisionReason::ExactEnglishDictionary,
+                generation: 1,
+                simulation_only: true,
+            }
+        }
+
+        #[test]
+        fn real_service_handoff_binds_to_controlled_surface_and_race() {
+            let mut processor = DiagnosticDecisionProcessor::default();
+            for (sequence, character) in
+                [(1, 'r'), (2, 'e'), (3, 's'), (4, 'u'), (5, 'm'), (6, 'e')]
+            {
+                processor.process(&ObservedInputEvent {
+                    key: ObservedKey::letter(character).unwrap(),
+                    kind: KeyEventKind::KeyDown,
+                    modifiers: ModifierState::new(),
+                    injection_origin: InjectionOrigin::PhysicalOrUnmarked,
+                    sequence: EventSequence::new(sequence).unwrap(),
+                });
+            }
+            processor.process(&ObservedInputEvent {
+                key: ObservedKey::space(),
+                kind: KeyEventKind::KeyDown,
+                modifiers: ModifierState::new(),
+                injection_origin: InjectionOrigin::PhysicalOrUnmarked,
+                sequence: EventSequence::new(7).unwrap(),
+            });
+            let handoff = processor
+                .current_restore_handoff()
+                .expect("resume creates a handoff");
+            let mut surface =
+                ControlledSurface::new(SurfaceId::new(7), handoff.rendered_token.clone());
+            surface
+                .set_caret(TextUnit::new(
+                    u32::try_from(handoff.rendered_units_to_replace).unwrap(),
+                ))
+                .unwrap();
+            let snapshot = surface.capture(&handoff.rendered_token).unwrap();
+            assert_eq!(surface.validate(&handoff, &snapshot), Ok(()));
+            surface.set_secure(SecureState::Secure).unwrap();
+            assert_eq!(
+                surface.validate(&handoff, &snapshot),
+                Err(ControlledValidationError::RevisionMismatch)
+            );
+            assert_eq!(surface.text(), handoff.rendered_token);
+        }
+        #[test]
+        fn controlled_surface_validates_exact_unicode_range() {
+            let mut s = ControlledSurface::new(SurfaceId::new(1), "rÃ©ume");
+            s.set_caret(TextUnit::new(6)).unwrap();
+            let snap = s.capture("rÃ©ume").unwrap();
+            assert_eq!(snap.text, "rÃ©ume");
+            assert_eq!(snap.range.0.get(), 0);
+        }
+        #[test]
+        fn controlled_surface_rejects_selection_and_unknown_states() {
+            let mut s = ControlledSurface::new(SurfaceId::new(1), "resume");
+            s.set_caret(TextUnit::new(6)).unwrap();
+            let h = handoff("resume");
+            let snap = s.capture("resume").unwrap();
+            s.set_selection(SelectionState::Range {
+                start: TextUnit::new(0),
+                end: TextUnit::new(1),
+            })
+            .unwrap();
+            assert_eq!(
+                s.validate(&h, &snap),
+                Err(ControlledValidationError::RevisionMismatch)
+            );
+            let _ = s.set_selection(SelectionState::None);
+            s.set_composition(CompositionState::Unknown).unwrap();
+            let snap = s.capture("resume").unwrap();
+            assert_eq!(
+                s.validate(&h, &snap),
+                Err(ControlledValidationError::CompositionUnknown)
+            );
+        }
+        #[test]
+        fn compare_replace_is_atomic_and_rejects_stale_snapshot() {
+            let mut s = ControlledSurface::new(SurfaceId::new(1), "resume");
+            s.set_caret(TextUnit::new(6)).unwrap();
+            let h = handoff("resume");
+            let snap = s.capture("resume").unwrap();
+            s.replace_text("resume").unwrap();
+            assert_eq!(
+                s.compare_revision_and_replace(&h, &snap, "x"),
+                Err(ControlledValidationError::RevisionMismatch)
+            );
+            assert_eq!(s.text(), "resume");
+        }
+        #[test]
+        fn compare_replace_happy_path_updates_once() {
+            let mut s = ControlledSurface::new(SurfaceId::new(1), "rÃ©ume");
+            s.set_caret(TextUnit::new(6)).unwrap();
+            let h = handoff("rÃ©ume");
+            let snap = s.capture("rÃ©ume").unwrap();
+            let rev = s.revision();
+            s.compare_revision_and_replace(&h, &snap, "resume").unwrap();
+            assert_eq!(s.text(), "resume");
+            assert_eq!(s.revision(), rev + 1);
+        }
+        #[test]
+        fn revision_overflow_fails_closed() {
+            let mut s = ControlledSurface::new(SurfaceId::new(1), "x");
+            s.set_revision_for_test(u64::MAX);
+            assert_eq!(
+                s.set_caret(TextUnit::new(0)),
+                Err(ControlledValidationError::RevisionOverflow)
+            );
+        }
+        #[test]
+        fn identical_surfaces_do_not_share_identity() {
+            let mut a = ControlledSurface::new(SurfaceId::new(1), "resume");
+            let mut b = ControlledSurface::new(SurfaceId::new(2), "resume");
+            a.set_caret(TextUnit::new(6)).unwrap();
+            b.set_caret(TextUnit::new(6)).unwrap();
+            let snap = a.capture("resume").unwrap();
+            let h = handoff("resume");
+            assert_eq!(
+                b.validate(&h, &snap),
+                Err(ControlledValidationError::TargetIdentityMismatch)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use zonkey_types::{EventSequence, KeyEventKind, ModifierState, ObservedKey};
