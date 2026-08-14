@@ -535,6 +535,29 @@ rather than wrapping or reusing identity.
   approved readiness only; production editing remains out of scope. See ADR
   0018.
 
+#### M3D-02 - Narrow Win32 edit-control acquisition spike - BLOCKED_BY_UIA_ENVIRONMENT
+
+- Read-only UIA probe limited to a standard Win32 `Edit` control, excluding
+  secure/password fields and rejecting unknown, denied, stale, contradictory,
+  or unsupported evidence.
+- Sanitized evidence only: provider/class identity, empty selection, and exact
+  candidate text immediately before the caret. UIA/COM remains isolated in
+  `zonkey-win`; no mutation, editing, or production execution is included. See
+  ADR 0019. Windows-only test fixtures create and destroy owned controls for
+  validation; they do not modify external applications.
+- Standard Edit identity resolves, but usable UIA TextPattern is unavailable in
+  the current environment; UIA validation is not claimed.
+
+#### M3D-04 - Narrow standard-EDIT native read-only fallback - DONE
+
+- Diagnostic-only `zonkey-win` path reads standard Win32 `Edit` text and
+  empty-caret selection with bounded native messaging, rejecting secure,
+  failed, timed-out, and contradictory states; cross-process selection reads
+  are bounded.
+- Text and selection are non-atomic reads; no execution or mutation safety is
+  implied. See ADR 0020.
+- Overall narrow acquisition validation is via the native fallback only.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

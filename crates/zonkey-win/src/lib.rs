@@ -187,7 +187,13 @@ fn map_key(virtual_key: u32) -> Option<ObservedKey> {
 #[cfg(windows)]
 mod native;
 #[cfg(windows)]
+mod native_edit;
+#[cfg(windows)]
 mod raw;
+#[cfg(windows)]
+mod uia;
+#[cfg(windows)]
+pub use native_edit::{NativeEditEvidence, NativeEditProbeError};
 
 /// Runs the Windows observe-only manual spike.
 ///
@@ -208,6 +214,33 @@ pub fn run_observe() -> Result<(), &'static str> {
 #[cfg(windows)]
 pub fn run_observe_raw() -> Result<(), &'static str> {
     raw::run_observe_raw()
+}
+
+/// Performs one read-only UI Automation evidence probe for the focused
+/// standard edit control. It never exposes native handles or mutates input.
+///
+/// # Errors
+///
+/// Returns a typed fail-closed error when the provider, control, selection,
+/// or exact candidate range cannot be proven.
+#[cfg(windows)]
+pub fn probe_focused_edit(rendered_token: &str) -> Result<uia::UiaEvidence, uia::UiaProbeError> {
+    uia::probe_focused_edit(rendered_token)
+}
+
+/// Performs a bounded, read-only diagnostic probe of a standard Win32 edit.
+/// The result is not an atomic snapshot and cannot authorize mutation.
+///
+/// # Errors
+///
+/// Returns a typed fail-closed error for unsupported, secure, timed-out,
+/// failed, contradictory, or mismatching evidence.
+#[cfg(windows)]
+pub fn probe_standard_edit(
+    hwnd: windows::Win32::Foundation::HWND,
+    rendered_token: &str,
+) -> Result<NativeEditEvidence, NativeEditProbeError> {
+    native_edit::probe_standard_edit(hwnd, rendered_token)
 }
 
 /// Runs the hook source with a platform-neutral diagnostic processor.

@@ -372,6 +372,31 @@ operation units, coherence, and atomicity remain unresolved. No API call or
 production adapter is implemented. Owner approved readiness only; production
 editing and acquisition implementation remain out of scope.
 
+### M3D-02 narrow Win32 edit UIA spike - BLOCKED_BY_UIA_ENVIRONMENT
+
+The Windows adapter contains a read-only, fail-closed UIA probe for one
+standard `Edit` control. It reports only sanitized provider/class identity,
+empty selection, and exact text immediately preceding the caret. UIA/COM and
+unsafe code remain isolated in `zonkey-win`; composition, session, operation
+units, freshness, coherence, and atomicity remain unresolved. No mutation path
+exists. Windows-only test fixtures create and destroy owned standard controls
+to exercise the validation boundary without depending on an external focused
+application; the probe itself remains read-only. See ADR 0019.
+
+The standard Edit identity path works, but this environment does not expose a
+usable TextPattern. UIA validation is therefore not claimed.
+
+### M3D-04 standard-EDIT native read-only fallback - DONE
+
+`zonkey-win` also contains a diagnostic-only fallback for standard Win32
+`Edit` controls. It uses `GetWindowTextW` and bounded `EM_GETSEL` delivery to
+compare the exact UTF-16 range immediately before an empty caret selection.
+Non-Edit, password, timed-out, failed, and contradictory reads fail closed;
+cross-process selection reads are bounded. Text and selection are separate
+reads, so this is not an atomic or freshness guarantee and cannot authorize
+mutation. The narrow acquisition checkpoint is validated via this native
+fallback. See ADR 0020.
+
 ### M3C-03 restore-plan precondition model - DONE
 
 `zonkey-service` provides fail-closed `PlanEligibility` validation for the
