@@ -1634,6 +1634,686 @@ mod controlled_surface {
 }
 
 #[cfg(test)]
+mod dummy_host {
+    use std::collections::BTreeMap;
+
+    pub const PROTOCOL_ID: &str = "zonkey.inproc-host/1";
+    const UNIT_SCHEMA: u16 = 1;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct TargetIdentity {
+        document_id: u64,
+        control_id: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct TextRange {
+        unit_schema: u16,
+        start: u32,
+        end: u32,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SelectionState {
+        Empty,
+        Range { start: u32, end: u32 },
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SecureState {
+        KnownNonSecure,
+        Secure,
+        Unknown,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CompositionState {
+        Inactive,
+        Active,
+        Unknown,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SessionState {
+        SupportedLocal,
+        UnsupportedRemote,
+        Unknown,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Capabilities {
+        flags: u8,
+        unit_schema: u16,
+    }
+
+    impl Capabilities {
+        const ALL: Self = Self {
+            flags: 0b0000_1111,
+            unit_schema: UNIT_SCHEMA,
+        };
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct RequestId(u64);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum IndeterminateReason {
+        InjectedAmbiguousCommit,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RejectReason {
+        MalformedRequest,
+        ProtocolMismatch,
+        AuthenticationFailed,
+        HostIdentityMismatch,
+        SessionMismatch,
+        TargetIdentityMismatch,
+        RevisionMismatch,
+        TextMismatch,
+        RangeMismatch,
+        UnitMismatch,
+        CaretMismatch,
+        SelectionNotEmpty,
+        SecureTarget,
+        SecureUnknown,
+        CompositionActive,
+        CompositionUnknown,
+        UnsupportedSession,
+        SessionUnknown,
+        CapabilityMismatch,
+        RequestIdReuse,
+        RevisionOverflow,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum HostResult {
+        Applied { new_revision: u64 },
+        Rejected(RejectReason),
+        Indeterminate(IndeterminateReason),
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CompareAndReplaceRequest {
+        protocol_id: String,
+        authenticated: bool,
+        host_id: u64,
+        session_id: u64,
+        request_id: RequestId,
+        identity: TargetIdentity,
+        revision: u64,
+        expected_range: TextRange,
+        expected_text: String,
+        replacement: String,
+        caret: u32,
+        selection: SelectionState,
+        secure: SecureState,
+        composition: CompositionState,
+        session: SessionState,
+        capabilities: Capabilities,
+        force_indeterminate: bool,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CachedResult {
+        request: CompareAndReplaceRequest,
+        result: HostResult,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct HostSnapshot {
+        host_id: u64,
+        session_id: u64,
+        identity: TargetIdentity,
+        revision: u64,
+        unit_schema: u16,
+        text: String,
+        caret: u32,
+        selection: SelectionState,
+        secure: SecureState,
+        composition: CompositionState,
+        session: SessionState,
+        capabilities: Capabilities,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct DummyHost {
+        host_id: u64,
+        session_id: u64,
+        identity: TargetIdentity,
+        revision: u64,
+        unit_schema: u16,
+        text: String,
+        caret: u32,
+        selection: SelectionState,
+        secure: SecureState,
+        composition: CompositionState,
+        session: SessionState,
+        capabilities: Capabilities,
+        request_results: BTreeMap<RequestId, CachedResult>,
+    }
+
+    impl DummyHost {
+        fn new(
+            host_id: u64,
+            session_id: u64,
+            document_id: u64,
+            control_id: u64,
+            text: &str,
+        ) -> Self {
+            Self {
+                host_id,
+                session_id,
+                identity: TargetIdentity {
+                    document_id,
+                    control_id,
+                },
+                revision: 1,
+                unit_schema: UNIT_SCHEMA,
+                text: text.to_owned(),
+                caret: 0,
+                selection: SelectionState::Empty,
+                secure: SecureState::KnownNonSecure,
+                composition: CompositionState::Inactive,
+                session: SessionState::SupportedLocal,
+                capabilities: Capabilities::ALL,
+                request_results: BTreeMap::new(),
+            }
+        }
+
+        fn units(&self) -> u32 {
+            self.text.chars().count().try_into().unwrap_or(u32::MAX)
+        }
+
+        fn snapshot(&self) -> HostSnapshot {
+            HostSnapshot {
+                host_id: self.host_id,
+                session_id: self.session_id,
+                identity: self.identity,
+                revision: self.revision,
+                unit_schema: self.unit_schema,
+                text: self.text.clone(),
+                caret: self.caret,
+                selection: self.selection,
+                secure: self.secure,
+                composition: self.composition,
+                session: self.session,
+                capabilities: self.capabilities,
+            }
+        }
+
+        fn request(
+            &self,
+            request_id: RequestId,
+            expected_range: TextRange,
+            expected_text: &str,
+            replacement: &str,
+        ) -> CompareAndReplaceRequest {
+            CompareAndReplaceRequest {
+                protocol_id: PROTOCOL_ID.to_owned(),
+                authenticated: true,
+                host_id: self.host_id,
+                session_id: self.session_id,
+                request_id,
+                identity: self.identity,
+                revision: self.revision,
+                expected_range,
+                expected_text: expected_text.to_owned(),
+                replacement: replacement.to_owned(),
+                caret: self.caret,
+                selection: self.selection,
+                secure: self.secure,
+                composition: self.composition,
+                session: self.session,
+                capabilities: self.capabilities,
+                force_indeterminate: false,
+            }
+        }
+
+        fn bump(&mut self) -> Result<u64, RejectReason> {
+            let next = self
+                .revision
+                .checked_add(1)
+                .ok_or(RejectReason::RevisionOverflow)?;
+            self.revision = next;
+            Ok(next)
+        }
+
+        fn set_secure(&mut self, value: SecureState) -> Result<(), RejectReason> {
+            self.bump()?;
+            self.secure = value;
+            Ok(())
+        }
+
+        fn set_composition(&mut self, value: CompositionState) -> Result<(), RejectReason> {
+            self.bump()?;
+            self.composition = value;
+            Ok(())
+        }
+
+        fn set_session(&mut self, value: SessionState) -> Result<(), RejectReason> {
+            self.bump()?;
+            self.session = value;
+            Ok(())
+        }
+
+        fn set_selection(&mut self, value: SelectionState) -> Result<(), RejectReason> {
+            if let SelectionState::Range { start, end } = value
+                && (start > end || end > self.units())
+            {
+                return Err(RejectReason::RangeMismatch);
+            }
+            self.bump()?;
+            self.selection = value;
+            Ok(())
+        }
+
+        fn restart(&mut self) -> Result<(), RejectReason> {
+            let next_session_id = self
+                .session_id
+                .checked_add(1)
+                .ok_or(RejectReason::RevisionOverflow)?;
+            let next_revision = self
+                .revision
+                .checked_add(1)
+                .ok_or(RejectReason::RevisionOverflow)?;
+            self.session_id = next_session_id;
+            self.revision = next_revision;
+            self.request_results.clear();
+            Ok(())
+        }
+
+        fn compare_and_replace(&mut self, request: CompareAndReplaceRequest) -> HostResult {
+            if request.request_id.0 == 0 {
+                return HostResult::Rejected(RejectReason::MalformedRequest);
+            }
+            if let Some(cached) = self.request_results.get(&request.request_id) {
+                if cached.request == request {
+                    return cached.result.clone();
+                }
+                return HostResult::Rejected(RejectReason::RequestIdReuse);
+            }
+
+            let result = self.validate_and_apply(&request);
+            self.request_results.insert(
+                request.request_id,
+                CachedResult {
+                    request,
+                    result: result.clone(),
+                },
+            );
+            result
+        }
+
+        #[allow(clippy::too_many_lines)]
+        fn validate_and_apply(&mut self, request: &CompareAndReplaceRequest) -> HostResult {
+            if request.protocol_id != PROTOCOL_ID {
+                return HostResult::Rejected(RejectReason::ProtocolMismatch);
+            }
+            if !request.authenticated {
+                return HostResult::Rejected(RejectReason::AuthenticationFailed);
+            }
+            if request.host_id != self.host_id {
+                return HostResult::Rejected(RejectReason::HostIdentityMismatch);
+            }
+            if request.session_id != self.session_id {
+                return HostResult::Rejected(RejectReason::SessionMismatch);
+            }
+            if request.identity != self.identity {
+                return HostResult::Rejected(RejectReason::TargetIdentityMismatch);
+            }
+            if request.capabilities != self.capabilities {
+                return HostResult::Rejected(RejectReason::CapabilityMismatch);
+            }
+            if request.expected_range.unit_schema != self.unit_schema {
+                return HostResult::Rejected(RejectReason::UnitMismatch);
+            }
+            if request.revision != self.revision {
+                return HostResult::Rejected(RejectReason::RevisionMismatch);
+            }
+            if request.expected_range.start > request.expected_range.end
+                || request.expected_range.end > self.units()
+            {
+                return HostResult::Rejected(RejectReason::RangeMismatch);
+            }
+            if request.caret != self.caret || request.expected_range.end != request.caret {
+                return HostResult::Rejected(RejectReason::CaretMismatch);
+            }
+            if !matches!(request.selection, SelectionState::Empty)
+                || !matches!(self.selection, SelectionState::Empty)
+            {
+                return HostResult::Rejected(RejectReason::SelectionNotEmpty);
+            }
+            if request.selection != self.selection {
+                return HostResult::Rejected(RejectReason::SelectionNotEmpty);
+            }
+            if request.secure != self.secure {
+                return HostResult::Rejected(RejectReason::SecureTarget);
+            }
+            match self.secure {
+                SecureState::KnownNonSecure => {}
+                SecureState::Secure => {
+                    return HostResult::Rejected(RejectReason::SecureTarget);
+                }
+                SecureState::Unknown => {
+                    return HostResult::Rejected(RejectReason::SecureUnknown);
+                }
+            }
+            if request.composition != self.composition {
+                return HostResult::Rejected(RejectReason::CompositionActive);
+            }
+            match self.composition {
+                CompositionState::Inactive => {}
+                CompositionState::Active => {
+                    return HostResult::Rejected(RejectReason::CompositionActive);
+                }
+                CompositionState::Unknown => {
+                    return HostResult::Rejected(RejectReason::CompositionUnknown);
+                }
+            }
+            if request.session != self.session {
+                return HostResult::Rejected(RejectReason::SessionMismatch);
+            }
+            match self.session {
+                SessionState::SupportedLocal => {}
+                SessionState::UnsupportedRemote => {
+                    return HostResult::Rejected(RejectReason::UnsupportedSession);
+                }
+                SessionState::Unknown => {
+                    return HostResult::Rejected(RejectReason::SessionUnknown);
+                }
+            }
+
+            let start = request.expected_range.start as usize;
+            let end = request.expected_range.end as usize;
+            let chars: Vec<char> = self.text.chars().collect();
+            let actual: String = chars[start..end].iter().collect();
+            if actual != request.expected_text {
+                return HostResult::Rejected(RejectReason::TextMismatch);
+            }
+            let Ok(replacement_units) = u32::try_from(request.replacement.chars().count()) else {
+                return HostResult::Rejected(RejectReason::RangeMismatch);
+            };
+            let Some(new_revision) = self.revision.checked_add(1) else {
+                return HostResult::Rejected(RejectReason::RevisionOverflow);
+            };
+            let mut next = String::new();
+            next.extend(chars[..start].iter());
+            next.push_str(&request.replacement);
+            next.extend(chars[end..].iter());
+            let Some(new_caret) = request.expected_range.start.checked_add(replacement_units)
+            else {
+                return HostResult::Rejected(RejectReason::RangeMismatch);
+            };
+
+            self.text = next;
+            self.caret = new_caret;
+            self.selection = SelectionState::Empty;
+            self.revision = new_revision;
+            if request.force_indeterminate {
+                HostResult::Indeterminate(IndeterminateReason::InjectedAmbiguousCommit)
+            } else {
+                HostResult::Applied { new_revision }
+            }
+        }
+
+        #[cfg(test)]
+        fn set_revision_for_test(&mut self, revision: u64) {
+            self.revision = revision;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn host() -> DummyHost {
+            let mut host = DummyHost::new(1, 10, 20, 30, "resume");
+            host.caret = 6;
+            host
+        }
+
+        fn request(host: &DummyHost, request_id: u64) -> CompareAndReplaceRequest {
+            host.request(
+                RequestId(request_id),
+                TextRange {
+                    unit_schema: UNIT_SCHEMA,
+                    start: 0,
+                    end: 6,
+                },
+                "resume",
+                "restored",
+            )
+        }
+
+        #[test]
+        fn successful_apply_is_atomic_and_advances_revision() {
+            let mut host = host();
+            let before = host.snapshot();
+            let result = host.compare_and_replace(request(&host, 1));
+            assert_eq!(result, HostResult::Applied { new_revision: 2 });
+            assert_eq!(host.text, "restored");
+            assert_eq!(host.revision, before.revision + 1);
+            assert_eq!(host.caret, 8);
+            assert_eq!(host.selection, SelectionState::Empty);
+        }
+
+        #[test]
+        fn stale_revision_rejects_without_partial_mutation() {
+            let mut host = host();
+            let mut request = request(&host, 1);
+            request.revision = 0;
+            let before = host.snapshot();
+            assert_eq!(
+                host.compare_and_replace(request),
+                HostResult::Rejected(RejectReason::RevisionMismatch)
+            );
+            assert_eq!(host.snapshot(), before);
+        }
+
+        #[test]
+        fn wrong_document_control_and_session_reject() {
+            let mut host = host();
+            let mut wrong_document = request(&host, 1);
+            wrong_document.identity.document_id = 99;
+            assert_eq!(
+                host.compare_and_replace(wrong_document),
+                HostResult::Rejected(RejectReason::TargetIdentityMismatch)
+            );
+            let mut wrong_control = request(&host, 2);
+            wrong_control.identity.control_id = 99;
+            assert_eq!(
+                host.compare_and_replace(wrong_control),
+                HostResult::Rejected(RejectReason::TargetIdentityMismatch)
+            );
+            let mut wrong_session = request(&host, 3);
+            wrong_session.session_id = 11;
+            assert_eq!(
+                host.compare_and_replace(wrong_session),
+                HostResult::Rejected(RejectReason::SessionMismatch)
+            );
+        }
+
+        #[test]
+        fn text_and_range_mismatch_reject_without_mutation() {
+            let mut host = host();
+            let before = host.snapshot();
+            let mut text_mismatch = request(&host, 1);
+            text_mismatch.expected_text = "resume!".into();
+            assert_eq!(
+                host.compare_and_replace(text_mismatch),
+                HostResult::Rejected(RejectReason::TextMismatch)
+            );
+            let mut range_mismatch = request(&host, 2);
+            range_mismatch.expected_range.end = 5;
+            assert_eq!(
+                host.compare_and_replace(range_mismatch),
+                HostResult::Rejected(RejectReason::CaretMismatch)
+            );
+            assert_eq!(host.snapshot(), before);
+        }
+
+        #[test]
+        fn unit_protocol_and_capability_mismatch_reject() {
+            let mut host = host();
+            let mut unit = request(&host, 1);
+            unit.expected_range.unit_schema = 2;
+            assert_eq!(
+                host.compare_and_replace(unit),
+                HostResult::Rejected(RejectReason::UnitMismatch)
+            );
+            let mut protocol = request(&host, 2);
+            protocol.protocol_id = "zonkey.inproc-host/0".into();
+            assert_eq!(
+                host.compare_and_replace(protocol),
+                HostResult::Rejected(RejectReason::ProtocolMismatch)
+            );
+            let mut capabilities = request(&host, 3);
+            capabilities.capabilities.flags &= !0b0000_0001;
+            assert_eq!(
+                host.compare_and_replace(capabilities),
+                HostResult::Rejected(RejectReason::CapabilityMismatch)
+            );
+        }
+
+        #[test]
+        fn secure_composition_and_session_states_reject() {
+            let mut secure = host();
+            secure.set_secure(SecureState::Secure).unwrap();
+            assert_eq!(
+                secure.compare_and_replace(request(&secure, 1)),
+                HostResult::Rejected(RejectReason::SecureTarget)
+            );
+            let mut unknown_secure = host();
+            unknown_secure.set_secure(SecureState::Unknown).unwrap();
+            assert_eq!(
+                unknown_secure.compare_and_replace(request(&unknown_secure, 1)),
+                HostResult::Rejected(RejectReason::SecureUnknown)
+            );
+            let mut composition = host();
+            composition
+                .set_composition(CompositionState::Active)
+                .unwrap();
+            assert_eq!(
+                composition.compare_and_replace(request(&composition, 1)),
+                HostResult::Rejected(RejectReason::CompositionActive)
+            );
+            let mut unknown_composition = host();
+            unknown_composition
+                .set_composition(CompositionState::Unknown)
+                .unwrap();
+            assert_eq!(
+                unknown_composition.compare_and_replace(request(&unknown_composition, 1)),
+                HostResult::Rejected(RejectReason::CompositionUnknown)
+            );
+            let mut session = host();
+            session
+                .set_session(SessionState::UnsupportedRemote)
+                .unwrap();
+            assert_eq!(
+                session.compare_and_replace(request(&session, 1)),
+                HostResult::Rejected(RejectReason::UnsupportedSession)
+            );
+            let mut unknown_session = host();
+            unknown_session.set_session(SessionState::Unknown).unwrap();
+            assert_eq!(
+                unknown_session.compare_and_replace(request(&unknown_session, 1)),
+                HostResult::Rejected(RejectReason::SessionUnknown)
+            );
+        }
+
+        #[test]
+        fn duplicate_exact_request_is_idempotent_and_conflicting_reuse_rejects() {
+            let mut host = host();
+            let original_request = request(&host, 1);
+            let first = host.compare_and_replace(original_request.clone());
+            let second = host.compare_and_replace(original_request);
+            assert_eq!(first, HostResult::Applied { new_revision: 2 });
+            assert_eq!(second, first);
+            assert_eq!(host.text, "restored");
+            let mut conflict = request(&host, 1);
+            conflict.revision = 2;
+            conflict.expected_text = "restored".into();
+            conflict.expected_range.end = 8;
+            conflict.caret = 8;
+            assert_eq!(
+                host.compare_and_replace(conflict),
+                HostResult::Rejected(RejectReason::RequestIdReuse)
+            );
+        }
+
+        #[test]
+        fn restart_invalidates_old_session_requests() {
+            let mut host = host();
+            let old = request(&host, 1);
+            host.restart().unwrap();
+            assert_eq!(host.session_id, 11);
+            assert_eq!(
+                host.compare_and_replace(old),
+                HostResult::Rejected(RejectReason::SessionMismatch)
+            );
+        }
+
+        #[test]
+        fn malformed_request_and_overflow_fail_closed() {
+            let mut host = host();
+            let mut malformed = request(&host, 0);
+            assert_eq!(
+                host.compare_and_replace(malformed.clone()),
+                HostResult::Rejected(RejectReason::MalformedRequest)
+            );
+            malformed.request_id = RequestId(1);
+            malformed.expected_range.start = 7;
+            malformed.expected_range.end = 6;
+            let before = host.snapshot();
+            assert_eq!(
+                host.compare_and_replace(malformed),
+                HostResult::Rejected(RejectReason::RangeMismatch)
+            );
+            assert_eq!(host.snapshot(), before);
+
+            host.set_revision_for_test(u64::MAX);
+            let overflow = request(&host, 2);
+            let before = host.snapshot();
+            assert_eq!(
+                host.compare_and_replace(overflow),
+                HostResult::Rejected(RejectReason::RevisionOverflow)
+            );
+            assert_eq!(host.snapshot(), before);
+        }
+
+        #[test]
+        fn indeterminate_result_is_cached_without_automatic_retry() {
+            let mut host = host();
+            let mut request = request(&host, 1);
+            request.force_indeterminate = true;
+            let result = host.compare_and_replace(request.clone());
+            assert_eq!(
+                result,
+                HostResult::Indeterminate(IndeterminateReason::InjectedAmbiguousCommit)
+            );
+            assert_eq!(host.text, "restored");
+            assert_eq!(host.revision, 2);
+            assert_eq!(host.compare_and_replace(request), result);
+            assert_eq!(host.revision, 2);
+        }
+
+        #[test]
+        fn non_empty_selection_rejects_without_mutation() {
+            let mut host = host();
+            host.set_selection(SelectionState::Range { start: 0, end: 1 })
+                .unwrap();
+            let before = host.snapshot();
+            assert_eq!(
+                host.compare_and_replace(request(&host, 1)),
+                HostResult::Rejected(RejectReason::SelectionNotEmpty)
+            );
+            assert_eq!(host.snapshot(), before);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use zonkey_types::{EventSequence, KeyEventKind, ModifierState, ObservedKey};
