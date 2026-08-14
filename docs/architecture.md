@@ -1,5 +1,11 @@
 # Zonkey architecture and implementation status
 
+## Supported platform
+
+ZonKey officially targets Windows 11 x64 using the Rust target
+`x86_64-pc-windows-msvc`. Windows 32-bit, `i686-pc-windows-msvc`, 32-bit CI,
+and x86-specific compatibility workarounds are out of scope.
+
 
 ## M2 detection and policy boundary
 
@@ -392,10 +398,17 @@ usable TextPattern. UIA validation is therefore not claimed.
 `Edit` controls. It uses `GetWindowTextW` and bounded `EM_GETSEL` delivery to
 compare the exact UTF-16 range immediately before an empty caret selection.
 Non-Edit, password, timed-out, failed, and contradictory reads fail closed;
-cross-process selection reads are bounded. Text and selection are separate
-reads, so this is not an atomic or freshness guarantee and cannot authorize
-mutation. The narrow acquisition checkpoint is validated via this native
-fallback. See ADR 0020.
+cross-process selection reads are bounded. The probe takes two bounded samples
+and rejects if identity, style, text, or selection changes between them. This
+detects some staleness but is not an atomic or freshness guarantee and cannot
+authorize mutation. The narrow acquisition checkpoint is validated via this
+native fallback. See ADRs 0020 and 0021.
+
+### M3D-05 coherence/freshness boundary - DONE
+
+The current boundary is `PARTIAL_STALENESS_DETECTION_ONLY`: a fixed
+two-sample comparison rejects observed changes without claiming an atomic
+snapshot, future freshness, or validation-to-mutation safety.
 
 ### M3C-03 restore-plan precondition model - DONE
 

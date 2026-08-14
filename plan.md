@@ -43,7 +43,9 @@ Khi clone Cay, lập `docs/cay-audit.md` theo bảng dưới. Không port code t
 
 ### In scope
 
-- Windows 11 x64 trước; Windows 10 là compatibility target.
+- Supported platform: Windows 11 x64 only (`x86_64-pc-windows-msvc`).
+- Windows 32-bit, `i686-pc-windows-msvc`, 32-bit CI, and x86-specific
+  compatibility workarounds are out of scope.
 - Telex chuẩn và compatibility test với bộ case Cay/UniKey theo phạm vi được phép.
 - English recovery theo token boundary.
 - Technical dictionary, personal dictionary và never-transform rules.
@@ -554,9 +556,17 @@ rather than wrapping or reusing identity.
   empty-caret selection with bounded native messaging, rejecting secure,
   failed, timed-out, and contradictory states; cross-process selection reads
   are bounded.
-- Text and selection are non-atomic reads; no execution or mutation safety is
-  implied. See ADR 0020.
+- A fixed two-sample comparison rejects observed identity, style, text, or
+  selection changes. This is partial staleness detection only; reads remain
+  non-atomic and imply no execution or mutation safety. See ADRs 0020 and
+  0021.
 - Overall narrow acquisition validation is via the native fallback only.
+
+#### M3D-05 - Coherence/freshness boundary - DONE
+
+- Outcome: `PARTIAL_STALENESS_DETECTION_ONLY`.
+- No atomic snapshot, future freshness guarantee, or validation-to-mutation
+  atomicity is claimed.
 
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
@@ -616,7 +626,9 @@ observation, input modification, and injection remain out of scope.
 
 1. **License:** chỉ reuse Cay sau khi đọc LICENSE và xác nhận toàn bộ dependency/license compatible; nếu không, implement clean-room theo behavioral specification.
 2. **Input technology:** v1 hook + injection để prototype, nhưng đánh giá TSF trước bản production. TSF phức tạp hơn nhưng có thể tương thích text services tốt hơn.
-3. **Platform:** Windows-only v1; không hứa cross-platform trong roadmap ban đầu.
+3. **Platform:** Windows 11 x64 only for v1; Rust target is
+   `x86_64-pc-windows-msvc`. Windows 32-bit and cross-platform targets are not
+   supported.
 4. **Default policy:** auto-recovery chỉ ở writing profile với confidence cao; terminal và remote tắt mặc định.
 5. **Privacy:** local-first, offline-first, telemetry off.
 
