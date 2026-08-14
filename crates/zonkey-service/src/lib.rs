@@ -16,6 +16,320 @@ use zonkey_types::{
 /// The default maximum number of events retained by an observe queue.
 pub const DEFAULT_OBSERVE_QUEUE_CAPACITY: usize = 256;
 
+/// Read status supplied by a platform adapter for one sampled evidence bundle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundarySampleStatus {
+    /// All requested fields were read.
+    Available,
+    /// A required read failed.
+    Failed,
+    /// A bounded read expired.
+    TimedOut,
+}
+
+#[cfg(test)]
+mod boundary_validator_tests {
+    use super::{
+        BoundaryControlEvidence, BoundaryRejection, BoundarySample, BoundarySampleStatus,
+        BoundaryValidation, validate_boundary,
+    };
+
+    const CONTROL: BoundaryControlEvidence = BoundaryControlEvidence {
+        identity: 7,
+        supported: true,
+        secure: false,
+        style: 1,
+    };
+
+    fn sample(text: &[u16], start: usize, end: usize) -> BoundarySample<'_> {
+        BoundarySample {
+            utf16_text: text,
+            start,
+            end,
+            control: CONTROL,
+            status: BoundarySampleStatus::Available,
+        }
+    }
+
+    fn assert_rejected(
+        first: BoundarySample<'_>,
+        second: BoundarySample<'_>,
+        expected: &str,
+        reason: BoundaryRejection,
+    ) {
+        assert_eq!(
+            validate_boundary(first, second, expected),
+            BoundaryValidation::Rejected(reason)
+        );
+    }
+
+    #[test]
+    fn exact_ascii_is_validated() {
+        let text: Vec<u16> = "resume".encode_utf16().collect();
+        assert_eq!(
+            validate_boundary(sample(&text, 6, 6), sample(&text, 6, 6), "resume"),
+            BoundaryValidation::BoundaryValidated
+        );
+    }
+
+    #[test]
+    fn non_bmp_before_and_inside_candidate_is_validated() {
+        let text: Vec<u16> = "x😀resume".encode_utf16().collect();
+        assert_eq!(
+            validate_boundary(sample(&text, 9, 9), sample(&text, 9, 9), "😀resume"),
+            BoundaryValidation::BoundaryValidated
+        );
+    }
+
+    #[test]
+    fn surrogate_split_is_rejected() {
+        let text: Vec<u16> = "😀resume".encode_utf16().collect();
+        assert_rejected(
+            sample(&text, 1, 1),
+            sample(&text, 1, 1),
+            "",
+            BoundaryRejection::SurrogateSplit,
+        );
+    }
+
+    #[test]
+    fn malformed_utf16_is_rejected() {
+        let text = [0xd800, u16::from(b'r')];
+        assert_rejected(
+            sample(&text, 2, 2),
+            sample(&text, 2, 2),
+            "r",
+            BoundaryRejection::MalformedUtf16,
+        );
+    }
+
+    #[test]
+    fn changed_text_and_selection_are_rejected() {
+        let first_text: Vec<u16> = "resume".encode_utf16().collect();
+        let second_text: Vec<u16> = "resumf".encode_utf16().collect();
+        assert_rejected(
+            sample(&first_text, 6, 6),
+            sample(&second_text, 6, 6),
+            "resume",
+            BoundaryRejection::SamplesDisagree,
+        );
+        assert_rejected(
+            sample(&first_text, 6, 6),
+            sample(&first_text, 0, 2),
+            "resume",
+            BoundaryRejection::SamplesDisagree,
+        );
+    }
+
+    #[test]
+    fn identity_style_security_and_support_are_rejected() {
+        let text: Vec<u16> = "resume".encode_utf16().collect();
+        let mut other_identity = sample(&text, 6, 6);
+        other_identity.control.identity = 8;
+        assert_rejected(
+            sample(&text, 6, 6),
+            other_identity,
+            "resume",
+            BoundaryRejection::IdentityChanged,
+        );
+        let mut other_style = sample(&text, 6, 6);
+        other_style.control.style = 2;
+        assert_rejected(
+            sample(&text, 6, 6),
+            other_style,
+            "resume",
+            BoundaryRejection::StyleChanged,
+        );
+        let mut secure = sample(&text, 6, 6);
+        secure.control.secure = true;
+        assert_rejected(secure, secure, "resume", BoundaryRejection::SecureControl);
+        let mut unsupported = sample(&text, 6, 6);
+        unsupported.control.supported = false;
+        assert_rejected(
+            unsupported,
+            unsupported,
+            "resume",
+            BoundaryRejection::UnsupportedControl,
+        );
+    }
+
+    #[test]
+    fn prefix_and_range_errors_are_rejected() {
+        let text: Vec<u16> = "resume".encode_utf16().collect();
+        assert_rejected(
+            sample(&text, 6, 6),
+            sample(&text, 6, 6),
+            "other",
+            BoundaryRejection::PrefixMismatch,
+        );
+        assert_rejected(
+            sample(&text, 7, 7),
+            sample(&text, 7, 7),
+            "resume",
+            BoundaryRejection::IndexOutOfBounds,
+        );
+        assert_rejected(
+            sample(&text, 0, 2),
+            sample(&text, 0, 2),
+            "resume",
+            BoundaryRejection::SelectionNotEmpty,
+        );
+        assert_rejected(
+            sample(&text, 6, 5),
+            sample(&text, 6, 5),
+            "",
+            BoundaryRejection::InvalidRange,
+        );
+    }
+
+    #[test]
+    fn unavailable_samples_are_rejected() {
+        let text: Vec<u16> = "resume".encode_utf16().collect();
+        let mut failed = sample(&text, 6, 6);
+        failed.status = BoundarySampleStatus::Failed;
+        assert_rejected(
+            failed,
+            failed,
+            "resume",
+            BoundaryRejection::SampleUnavailable,
+        );
+        let mut timeout = sample(&text, 6, 6);
+        timeout.status = BoundarySampleStatus::TimedOut;
+        assert_rejected(
+            timeout,
+            timeout,
+            "resume",
+            BoundaryRejection::SampleUnavailable,
+        );
+    }
+}
+
+/// Sanitized capability and identity evidence for one sampled control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundaryControlEvidence {
+    /// Stable identity token supplied by the adapter; never a native handle.
+    pub identity: u64,
+    /// Whether the adapter proved the supported standard-EDIT class.
+    pub supported: bool,
+    /// Whether the adapter proved the control is secure/password-like.
+    pub secure: bool,
+    /// Sanitized style evidence used for sample agreement.
+    pub style: u32,
+}
+
+/// One borrowed UTF-16 evidence sample from a platform adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundarySample<'a> {
+    /// Complete sampled UTF-16 text. No offset is derived from scalar lengths.
+    pub utf16_text: &'a [u16],
+    /// Selection/caret start in UTF-16 code units.
+    pub start: usize,
+    /// Selection/caret end in UTF-16 code units.
+    pub end: usize,
+    /// Sanitized control evidence.
+    pub control: BoundaryControlEvidence,
+    /// Read status for this complete sample.
+    pub status: BoundarySampleStatus,
+}
+
+/// Result of validating a sampled standard-EDIT range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryValidation {
+    /// Internally valid for the supplied sampled UTF-16 state only.
+    BoundaryValidated,
+    /// Rejected before any execution consideration.
+    Rejected(BoundaryRejection),
+}
+
+/// Fail-closed reasons for boundary validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryRejection {
+    SampleUnavailable,
+    SamplesDisagree,
+    IdentityChanged,
+    StyleChanged,
+    UnsupportedControl,
+    SecureControl,
+    SelectionNotEmpty,
+    IndexOutOfBounds,
+    InvalidRange,
+    MalformedUtf16,
+    SurrogateSplit,
+    PrefixMismatch,
+}
+
+/// Validates two bounded, read-only standard-EDIT samples.
+///
+/// The result describes only internal validity of the sampled UTF-16 state. It
+/// is not a freshness, atomicity, mutation-safety, or execution authorization
+/// decision.
+#[must_use]
+pub fn validate_boundary(
+    first: BoundarySample<'_>,
+    second: BoundarySample<'_>,
+    expected: &str,
+) -> BoundaryValidation {
+    if first.status != BoundarySampleStatus::Available
+        || second.status != BoundarySampleStatus::Available
+    {
+        return BoundaryValidation::Rejected(BoundaryRejection::SampleUnavailable);
+    }
+    if first.control.identity != second.control.identity {
+        return BoundaryValidation::Rejected(BoundaryRejection::IdentityChanged);
+    }
+    if first.control.style != second.control.style {
+        return BoundaryValidation::Rejected(BoundaryRejection::StyleChanged);
+    }
+    if first.control != second.control
+        || first.utf16_text != second.utf16_text
+        || first.start != second.start
+        || first.end != second.end
+    {
+        return BoundaryValidation::Rejected(BoundaryRejection::SamplesDisagree);
+    }
+    if !second.control.supported {
+        return BoundaryValidation::Rejected(BoundaryRejection::UnsupportedControl);
+    }
+    if second.control.secure {
+        return BoundaryValidation::Rejected(BoundaryRejection::SecureControl);
+    }
+    if second.start > second.utf16_text.len() || second.end > second.utf16_text.len() {
+        return BoundaryValidation::Rejected(BoundaryRejection::IndexOutOfBounds);
+    }
+    if second.start > second.end {
+        return BoundaryValidation::Rejected(BoundaryRejection::InvalidRange);
+    }
+    if second.start != second.end {
+        return BoundaryValidation::Rejected(BoundaryRejection::SelectionNotEmpty);
+    }
+    if !is_well_formed_utf16(second.utf16_text) {
+        return BoundaryValidation::Rejected(BoundaryRejection::MalformedUtf16);
+    }
+    if splits_surrogate(second.utf16_text, second.start)
+        || splits_surrogate(second.utf16_text, second.end)
+    {
+        return BoundaryValidation::Rejected(BoundaryRejection::SurrogateSplit);
+    }
+    let expected_units: Vec<u16> = expected.encode_utf16().collect();
+    if expected_units.len() > second.start
+        || second.utf16_text[second.start - expected_units.len()..second.start] != expected_units
+    {
+        return BoundaryValidation::Rejected(BoundaryRejection::PrefixMismatch);
+    }
+    BoundaryValidation::BoundaryValidated
+}
+
+fn is_well_formed_utf16(text: &[u16]) -> bool {
+    char::decode_utf16(text.iter().copied()).all(|value| value.is_ok())
+}
+
+fn splits_surrogate(text: &[u16], index: usize) -> bool {
+    index > 0
+        && index < text.len()
+        && (0xd800..=0xdbff).contains(&text[index - 1])
+        && (0xdc00..=0xdfff).contains(&text[index])
+}
+
 /// Error returned when an observe queue capacity is zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueCapacityError;
