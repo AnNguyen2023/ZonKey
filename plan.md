@@ -568,6 +568,27 @@ rather than wrapping or reusing identity.
 - No atomic snapshot, future freshness guarantee, or validation-to-mutation
   atomicity is claimed.
 
+#### M3D-17 - VS Code host adapter spike - DONE
+
+- Smallest VS Code extension-side adapter mapping the cooperating-host
+  contract onto VS Code APIs for one local ordinary
+  `TextDocument`/`TextEditor` with a single caret, under
+  `hosts/vscode-spike`: evidence snapshot (protocol id, host/session identity,
+  document URI + open-instance epoch, editor identity, document version,
+  UTF-16 range + exact expected text + replacement, empty selection/caret,
+  capability flags) and one `TextEditor.edit` compare-and-replace with an
+  immediate pre-edit re-read and post-commit verification (exact next version
+  and exact resulting text).
+- Fail-closed rejection mirrors the service vocabulary plus
+  `EditTransactionRefused`; lost or ambiguous outcomes are `Indeterminate`
+  and are never auto-retried; request ids replay recorded results, conflicting
+  reuse rejects, and session restart clears the ledger.
+- VS Code exposes no IME composition state: the real binding reports
+  composition `Unknown`, so real-VS-Code applies fail closed
+  (`CompositionUnknown`); no composition proof is claimed and the `Applied`
+  path is dummy-harness-proven only. No auto-restore wiring, hooks, injection,
+  clipboard, SendInput, multi-host, or generic editor support. See ADR 0022.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

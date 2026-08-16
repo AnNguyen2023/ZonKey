@@ -1,0 +1,36 @@
+{
+  "name": "zonkey-vscode-spike",
+  "publisher": "zonkey-spike",
+  "version": "0.0.1",
+  "private": true,
+  "description": "M3D-17 VS Code cooperating-host adapter spike (dummy-harness validated; no production wiring)",
+  "type": "module",
+  "engines": {
+    "node": ">=22",
+    "vscode": "^1.90.0"
+  },
+  "main": "./out/extension.cjs",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "zonkeySpike.probe",
+        "title": "Zonkey spike: probe cooperating-host apply"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit",
+    "compile": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.cjs",
+    "compile:test": "esbuild integration/real-vscode.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/real-vscode-validation.cjs",
+    "test:real": "npm run compile && npm run compile:test && node scripts/run-real-vscode.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^2.4.0",
+    "esbuild": "^0.23.0",
+    "typescript": "^5.5.0"
+  }
+}

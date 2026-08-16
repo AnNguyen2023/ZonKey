@@ -35,3 +35,11 @@ cargo test --workspace
 The platform-independent M2 detection and policy core is implemented. It uses embedded, version-controlled exact dictionaries, deterministic technical-token protection, and explicit caller-provided context. Recovery returns a typed decision plus an optional abstract edit plan.
 
 This is still not an end-user IME. M2 has no hooks, injection, process inspection, GUI, tray, installer, elevation, network calls, or platform runtime behavior.
+
+## M3D-17 spike
+
+`hosts/vscode-spike/` holds a VS Code cooperating-host adapter spike: contract
+mapping, one-transaction compare-and-replace, and idempotent request ids,
+validated on a dummy extension harness only. Real VS Code applies fail closed
+at `CompositionUnknown` because VS Code cannot prove IME composition state. No
+production wiring. See `docs/adr/0022-m3d17-vscode-host-adapter-spike.md`.
