@@ -3,6 +3,8 @@
 //! This crate has no event source implementation. It accepts mock sources and
 //! typed values from `zonkey-types`; it never observes hardware or edits text.
 
+pub mod transport;
+
 use std::collections::VecDeque;
 
 use zonkey_detect::{BuiltInDictionaries, Classifier, DetectionRequest, LexicalEvidence};

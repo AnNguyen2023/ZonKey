@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { requestFromSnapshot } from "../src/adapter.ts";
+import { VsCodeHostAdapter, requestFromSnapshot } from "../src/adapter.ts";
 import { canonicalJson } from "../src/contract.ts";
 import type { CompareAndReplaceRequest, HostSnapshot } from "../src/contract.ts";
 import { FakeDocument, FakeEditor, world } from "./harness.ts";
@@ -329,4 +329,33 @@ test("canonical JSON is key-order independent and drops undefined", () => {
     canonicalJson({ a: { c: 3, d: 2 }, b: 1 }),
   );
   assert.equal(canonicalJson({ a: 1, b: undefined }), '{"a":1}');
+});
+
+test("bounded ledger evicts oldest request id deterministically", async () => {
+  const w = world("resume");
+  w.adapter = new VsCodeHostAdapter(w.binding, 2);
+  const first = request(w, "req-a");
+  assert.deepEqual(await w.adapter.apply(first), { kind: "Applied", new_revision: 2 });
+  w.editor.setCaret(w.doc.getText().length);
+  const second = request(w, "req-b", "restored", "resume");
+  assert.deepEqual(await w.adapter.apply(second), { kind: "Applied", new_revision: 3 });
+  w.editor.setCaret(w.doc.getText().length);
+  const third = request(w, "req-c", "resume", "restored");
+  assert.deepEqual(await w.adapter.apply(third), { kind: "Applied", new_revision: 4 });
+
+  // req-b and req-c are retained: duplicates replay recorded results even
+  // though the live document has moved on.
+  assert.deepEqual(await w.adapter.apply(second), { kind: "Applied", new_revision: 3 });
+  assert.deepEqual(await w.adapter.apply(third), { kind: "Applied", new_revision: 4 });
+  // req-a was evicted: its duplicate no longer replays the recorded Applied
+  // and instead fails live validation against the current version.
+  rejected(await w.adapter.apply(first), "RevisionMismatch");
+  assert.equal(w.editor.editAttempts, 3);
+});
+
+test("ledger capacity must be a positive integer", () => {
+  const w = world("resume");
+  assert.throws(() => new VsCodeHostAdapter(w.binding, 0), RangeError);
+  assert.throws(() => new VsCodeHostAdapter(w.binding, -1), RangeError);
+  assert.throws(() => new VsCodeHostAdapter(w.binding, 1.5), RangeError);
 });

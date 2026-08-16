@@ -609,6 +609,26 @@ rather than wrapping or reusing identity.
   `CompositionUnknown` stays fail-closed; no TSF, IPC, transport, mutation,
   or API selection is added. See ADR 0023.
 
+#### M3D-19 - Bounded request ledger and transport boundary - IN PROGRESS
+
+- Hardens cooperating-host protocol plumbing without enabling real mutation:
+  a platform-neutral `zonkey-service::transport` boundary (length-prefixed
+  UTF-8 frames capped at 64 KiB with fail-closed malformed/oversized
+  handling, a `zonkey.host-transport/1` hello that binds exactly one session
+  id as the only trusted identity, and timeout/connection-loss mapping to a
+  recorded ambiguous outcome that is never retried) plus bounded ledgers on
+  both sides of the contract.
+- Both ledgers use fixed capacity with deterministic FIFO eviction (oldest
+  inserted id first, lookups never refresh order); exact duplicates replay
+  recorded results without re-execution, conflicting reuse rejects, session
+  restart invalidates history, and every outcome kind including
+  `Indeterminate` is replayed verbatim. Evicted duplicates re-validate
+  against live host state before anything executes.
+- The Windows 11 x64 destination transport is a localhost named pipe; that OS
+  binding is deliberately not implemented. Real VS Code applies remain
+  fail-closed at `CompositionUnknown`; no composition, mutation, or
+  auto-restore policy changed. See ADR 0024.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

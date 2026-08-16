@@ -35,12 +35,26 @@ interface LedgerEntry {
   result: HostResult;
 }
 
+/** Default bounded request-ledger capacity for the host adapter. */
+export const DEFAULT_LEDGER_CAPACITY = 256;
+
 export class VsCodeHostAdapter {
   private readonly binding: HostBindingPort;
+  private readonly ledgerCapacity: number;
   private readonly ledger = new Map<string, LedgerEntry>();
 
-  constructor(binding: HostBindingPort) {
+  /**
+   * @throws {RangeError} when `ledgerCapacity` is not a positive integer.
+   */
+  constructor(
+    binding: HostBindingPort,
+    ledgerCapacity: number = DEFAULT_LEDGER_CAPACITY,
+  ) {
+    if (!Number.isSafeInteger(ledgerCapacity) || ledgerCapacity <= 0) {
+      throw new RangeError("ledgerCapacity must be a positive integer");
+    }
     this.binding = binding;
+    this.ledgerCapacity = ledgerCapacity;
   }
 
   /**
@@ -135,8 +149,31 @@ export class VsCodeHostAdapter {
         : { kind: "Rejected", reason: "RequestIdReuse" };
     }
     const result = await this.validateAndApply(request);
-    this.ledger.set(request.request_id, { canonical, result });
+    this.remember(request.request_id, canonical, result);
     return result;
+  }
+
+  /**
+   * Records one terminal outcome with deterministic FIFO eviction: when the
+   * ledger is full, the oldest inserted request id is dropped first. A Map
+   * preserves insertion order, so the first key is always the oldest entry.
+   */
+  private remember(
+    requestId: string,
+    canonical: string,
+    result: HostResult,
+  ): void {
+    if (this.ledger.has(requestId)) {
+      return;
+    }
+    while (this.ledger.size >= this.ledgerCapacity) {
+      const oldest = this.ledger.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.ledger.delete(oldest);
+    }
+    this.ledger.set(requestId, { canonical, result });
   }
 
   /**

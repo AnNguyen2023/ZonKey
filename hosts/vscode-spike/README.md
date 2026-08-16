@@ -55,6 +55,17 @@ exposes no IME composition state, so the honest host reports `Unknown` and the
 apply fails closed. The `Applied` path is proven only on the Node dummy
 harness. See `docs/adr/0022-m3d17-vscode-host-adapter-spike.md`.
 
+## Bounded ledger and transport (M3D-19)
+
+The adapter ledger is bounded (default capacity 256, validated up front) with
+deterministic FIFO eviction: the oldest inserted request id is dropped when
+full, exact duplicates replay recorded results, conflicting reuse rejects,
+and every outcome kind — including `Indeterminate` — is replayed without
+retry. The matching platform-neutral transport contract (framing, session
+binding, and ledger semantics) lives in `zonkey-service::transport`; the
+Windows named-pipe binding is deliberately not implemented yet, and real VS
+Code applies remain fail-closed at `CompositionUnknown`.
+
 ## Non-claims
 
 - No composition proof, no generic editor support beyond one local text
