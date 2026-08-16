@@ -589,6 +589,26 @@ rather than wrapping or reusing identity.
   path is dummy-harness-proven only. No auto-restore wiring, hooks, injection,
   clipboard, SendInput, multi-host, or generic editor support. See ADR 0022.
 
+#### M3D-18 - Composition evidence feasibility review - DONE
+
+- Design-only review with one narrow real-VS-Code capability probe. Verdict:
+  `NO_TRUSTWORTHY_COMPOSITION_BINDING`.
+- VS Code exposes no composition API, and document-change heuristics do not
+  measure composition state, so they do not qualify as evidence. TSF is
+  in-process COM: no supported mutation-free cross-process observer exists,
+  and external reads require running code inside the host process. A
+  sanitized read-only UIA probe measured that the real VS Code 1.133
+  Chromium provider does expose `TextEditPattern` (root web area plus Edit
+  elements) and that `GetActiveComposition` returns a measurable
+  no-composition state (`S_OK` with a null range) when no IME is active.
+- The verdict stays fail-closed because the TextEdit signal carries no
+  element identity that binds to the targeted VS Code editor/document of the
+  host contract, an active-composition usable range is unproven (producing
+  one would require injecting real IME input), and read-to-snapshot
+  coherence cannot be closed from outside the host transaction.
+  `CompositionUnknown` stays fail-closed; no TSF, IPC, transport, mutation,
+  or API selection is added. See ADR 0023.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
