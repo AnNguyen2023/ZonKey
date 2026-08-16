@@ -501,6 +501,192 @@ pub fn feed_token(
     });
 }
 
+/// Deterministic verdict of a reconciliation readback (M3D-28 / ADR 0030).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryVerdict {
+    /// The intended replacement is present exactly.
+    AppliedAcknowledged,
+    /// The original rendered text is still present exactly.
+    NotApplied,
+    /// Neither matches; a human must review.
+    ConflictHumanReview,
+}
+
+/// One blocked logical target awaiting reconciliation and acknowledgement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockedTarget {
+    /// Session that recorded the Indeterminate outcome.
+    pub session_id: String,
+    /// Document URI of the logical target.
+    pub uri: String,
+    /// Original rendered token at the time of the outcome.
+    pub expected: String,
+    /// Intended replacement of the lost outcome.
+    pub replacement: String,
+    /// UTF-16 range of the readback comparison.
+    pub range: (usize, usize),
+    /// Reconciliation state: none yet, or a verdict plus acknowledgement.
+    pub state: Option<(RecoveryVerdict, bool)>,
+}
+
+/// Fail-closed registry errors for the recovery workflow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveryError {
+    /// No blocked target matches the request.
+    UnknownTarget,
+    /// The command came from a different session than the blocked target.
+    SessionMismatch,
+    /// Acknowledgement before any reconciliation readback.
+    AckBeforeReconcile,
+}
+
+/// Bounded, in-session registry implementing the ADR 0030 recovery
+/// lifecycle: an Indeterminate outcome blocks a logical target; only an
+/// explicit reconciliation readback followed by an explicit operator
+/// acknowledgement unblocks it. State is deliberately **not persisted**: a
+/// crash or restart empties the registry, which must be re-established from
+/// operator records; durable recovery is a release-gated decision (ADR
+/// 0032). The oldest entry is evicted when the bound is reached.
+#[derive(Debug)]
+pub struct RecoveryRegistry {
+    capacity: usize,
+    order: VecDeque<String>,
+    entries: HashMap<String, BlockedTarget>,
+}
+
+impl RecoveryRegistry {
+    /// Constructs a registry with a validated non-zero capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerCapacityError`] when `capacity` is zero.
+    pub fn new(capacity: usize) -> Result<Self, LedgerCapacityError> {
+        if capacity == 0 {
+            return Err(LedgerCapacityError);
+        }
+        Ok(Self {
+            capacity,
+            order: VecDeque::new(),
+            entries: HashMap::new(),
+        })
+    }
+
+    fn key(uri: &str, expected: &str) -> String {
+        format!("{uri}\u{0}{expected}")
+    }
+
+    /// Records a blocked target; re-blocking the same target refreshes its
+    /// state. Returns the evicted target URI when the bound was reached.
+    pub fn block(
+        &mut self,
+        session_id: &str,
+        uri: &str,
+        expected: &str,
+        replacement: &str,
+        range: (usize, usize),
+    ) -> Option<String> {
+        let key = Self::key(uri, expected);
+        let mut evicted: Option<String> = None;
+        if !self.entries.contains_key(&key)
+            && self.order.len() == self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
+            evicted = Some(oldest.split('\u{0}').next().unwrap_or_default().to_owned());
+        }
+        if !self.entries.contains_key(&key) {
+            self.order.push_back(key.clone());
+        }
+        self.entries.insert(
+            key,
+            BlockedTarget {
+                session_id: session_id.to_owned(),
+                uri: uri.to_owned(),
+                expected: expected.to_owned(),
+                replacement: replacement.to_owned(),
+                range,
+                state: None,
+            },
+        );
+        evicted
+    }
+
+    /// Lists blocked targets in insertion order (sanitized view).
+    #[must_use]
+    pub fn list(&self) -> Vec<BlockedTarget> {
+        self.order
+            .iter()
+            .filter_map(|key| self.entries.get(key).cloned())
+            .collect()
+    }
+
+    /// Runs the reconciliation readback against live range text supplied by
+    /// the host snapshot; idempotent (a second call returns the recorded
+    /// verdict without re-evaluating).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError::UnknownTarget`] or
+    /// [`RecoveryError::SessionMismatch`].
+    pub fn reconcile(
+        &mut self,
+        session_id: &str,
+        uri: &str,
+        expected: &str,
+        live_range_text: &str,
+    ) -> Result<RecoveryVerdict, RecoveryError> {
+        let key = Self::key(uri, expected);
+        let target = self
+            .entries
+            .get_mut(&key)
+            .ok_or(RecoveryError::UnknownTarget)?;
+        if target.session_id != session_id {
+            return Err(RecoveryError::SessionMismatch);
+        }
+        if let Some((verdict, _)) = target.state {
+            return Ok(verdict);
+        }
+        let verdict = if live_range_text == target.replacement {
+            RecoveryVerdict::AppliedAcknowledged
+        } else if live_range_text == target.expected {
+            RecoveryVerdict::NotApplied
+        } else {
+            RecoveryVerdict::ConflictHumanReview
+        };
+        target.state = Some((verdict, false));
+        Ok(verdict)
+    }
+
+    /// Explicit operator acknowledgement; only valid after reconciliation.
+    /// A successful acknowledgement removes the block.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError`] for unknown targets, session mismatches,
+    /// or acknowledgements before reconciliation.
+    pub fn acknowledge(
+        &mut self,
+        session_id: &str,
+        uri: &str,
+        expected: &str,
+    ) -> Result<(), RecoveryError> {
+        let key = Self::key(uri, expected);
+        let target = self
+            .entries
+            .get_mut(&key)
+            .ok_or(RecoveryError::UnknownTarget)?;
+        if target.session_id != session_id {
+            return Err(RecoveryError::SessionMismatch);
+        }
+        let Some((_verdict, _)) = target.state else {
+            return Err(RecoveryError::AckBeforeReconcile);
+        };
+        self.entries.remove(&key);
+        self.order.retain(|entry| entry != &key);
+        Ok(())
+    }
+}
+
 /// Shared live decision state for the M3D-23 live observer wiring.
 ///
 /// The real observer path (`WH_KEYBOARD_LL` → `ObserveService` →
@@ -1113,5 +1299,100 @@ mod tests {
             sequence += 1;
         }
         live_space(state, sequence);
+    }
+
+    #[test]
+    fn recovery_registry_full_lifecycle() {
+        let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
+        assert!(registry.list().is_empty());
+        registry.block("sess-1", "file:///a", "resume", "restored", (0, 6));
+        assert_eq!(registry.list().len(), 1);
+        // Ack before reconciliation is rejected.
+        assert_eq!(
+            registry.acknowledge("sess-1", "file:///a", "resume"),
+            Err(RecoveryError::AckBeforeReconcile)
+        );
+        // All three deterministic verdicts.
+        assert_eq!(
+            registry.reconcile("sess-1", "file:///a", "resume", "restored"),
+            Ok(RecoveryVerdict::AppliedAcknowledged)
+        );
+        // Duplicate reconciliation is idempotent.
+        assert_eq!(
+            registry.reconcile("sess-1", "file:///a", "resume", "restored"),
+            Ok(RecoveryVerdict::AppliedAcknowledged)
+        );
+        assert_eq!(
+            registry.acknowledge("sess-1", "file:///a", "resume"),
+            Ok(())
+        );
+        assert!(registry.list().is_empty());
+        assert_eq!(
+            registry.acknowledge("sess-1", "file:///a", "resume"),
+            Err(RecoveryError::UnknownTarget)
+        );
+    }
+
+    #[test]
+    fn recovery_registry_not_applied_and_conflict_verdicts() {
+        let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
+        registry.block("sess-1", "file:///a", "resume", "restored", (0, 6));
+        assert_eq!(
+            registry.reconcile("sess-1", "file:///a", "resume", "resume"),
+            Ok(RecoveryVerdict::NotApplied)
+        );
+        assert_eq!(
+            registry.acknowledge("sess-1", "file:///a", "resume"),
+            Ok(())
+        );
+        registry.block("sess-1", "file:///b", "resume", "restored", (0, 6));
+        assert_eq!(
+            registry.reconcile("sess-1", "file:///b", "resume", "mangled!"),
+            Ok(RecoveryVerdict::ConflictHumanReview)
+        );
+        // Conflict still requires an explicit acknowledgement to unblock.
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(
+            registry.acknowledge("sess-1", "file:///b", "resume"),
+            Ok(())
+        );
+        assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn recovery_registry_rejects_wrong_session_and_unknown_targets() {
+        let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
+        registry.block("sess-1", "file:///a", "resume", "restored", (0, 6));
+        assert_eq!(
+            registry.reconcile("sess-2", "file:///a", "resume", "restored"),
+            Err(RecoveryError::SessionMismatch)
+        );
+        assert_eq!(
+            registry.acknowledge("sess-2", "file:///a", "resume"),
+            Err(RecoveryError::SessionMismatch)
+        );
+        assert_eq!(
+            registry.reconcile("sess-1", "file:///missing", "resume", "x"),
+            Err(RecoveryError::UnknownTarget)
+        );
+    }
+
+    #[test]
+    fn recovery_registry_is_bounded_and_restart_empties_state() {
+        let mut registry = RecoveryRegistry::new(1).expect("non-zero capacity");
+        assert_eq!(
+            registry.block("sess-1", "file:///a", "t1", "r1", (0, 2)),
+            None
+        );
+        let evicted = registry.block("sess-1", "file:///b", "t2", "r2", (0, 2));
+        assert_eq!(evicted.as_deref(), Some("file:///a"));
+        assert_eq!(registry.list().len(), 1);
+        // A restart is modeled by a fresh registry: state is not durable.
+        let mut restarted = RecoveryRegistry::new(4).expect("non-zero capacity");
+        assert!(restarted.list().is_empty());
+        assert_eq!(
+            restarted.acknowledge("sess-1", "file:///b", "t2"),
+            Err(RecoveryError::UnknownTarget)
+        );
     }
 }

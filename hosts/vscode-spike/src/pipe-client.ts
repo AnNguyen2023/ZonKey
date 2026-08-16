@@ -174,6 +174,27 @@ export class NamedPipeClient {
     return payload.slice(prefix.length);
   }
 
+  /** Sends one operator RECOVERY command (session is added by this method). */
+  async recoveryCommand(command: string, timeoutMs: number): Promise<string> {
+    if (this.closed) {
+      throw { kind: "ConnectionLost" } as PipeClientError;
+    }
+    this.socket.write(encodeFrame(`RECOVERY|${this.session}|${command}`));
+    const payload = await this.nextFrame(timeoutMs);
+    if (payload.startsWith("ERROR|")) {
+      const reason = payload.slice("ERROR|".length);
+      if (reason === "session_mismatch") {
+        throw { kind: "SessionMismatch" } as PipeClientError;
+      }
+      throw { kind: "InvalidPayload", detail: reason } as PipeClientError;
+    }
+    const prefix = "RESULT|DEFINITE|";
+    if (!payload.startsWith(prefix)) {
+      throw { kind: "InvalidPayload", detail: "expected recovery result" } as PipeClientError;
+    }
+    return payload.slice(prefix.length);
+  }
+
   /** Drops the connection immediately; pending awaits reject. */
   destroy(): void {
     this.closed = true;

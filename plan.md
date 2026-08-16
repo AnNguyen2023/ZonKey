@@ -783,6 +783,23 @@ rather than wrapping or reusing identity.
   reconcile/readback and owner-ack tooling without any mutation. See ADR
   0032.
 
+#### M3D-28 - Production reconciliation and recovery tooling - DONE
+
+- `RecoveryRegistry` in `zonkey-service::transport`: bounded (FIFO
+  eviction), in-session blocked-target registry implementing the ADR 0030
+  recovery lifecycle — Indeterminate blocks the logical target (URI +
+  rendered token); only an explicit reconciliation readback
+  (`AppliedAcknowledged`/`NotApplied`/`ConflictHumanReview`, idempotent)
+  plus an explicit operator acknowledgement unblocks it; ack-before-
+  reconcile and wrong sessions are rejected; persistence is deliberately
+  absent (restart empties state; durable recovery stays release-gated).
+- The pipe protocol reuses the session-bound framing with one `RECOVERY`
+  command family (LIST/BLOCK/RECONCILE/ACK); `zonkey-cli recovery` exposes
+  the operator surface; both endpoints carry the shared registry. Verified
+  by registry and real-pipe tests plus a real-VS-Code E2E
+  (`npm run test:recovery`) ending in an untouched document. No mutation,
+  no Applied path, `CompositionUnknown` unchanged. See ADR 0033.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

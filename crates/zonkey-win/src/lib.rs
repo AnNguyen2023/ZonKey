@@ -259,6 +259,10 @@ pub fn run_serve_host_validation(
         64,
         pipe_transport::composition_gate_handler(),
         handoff,
+        Some(std::sync::Arc::new(std::sync::Mutex::new(
+            zonkey_service::transport::RecoveryRegistry::new(64)
+                .map_err(|_| "recovery capacity".to_owned())?,
+        ))),
     )
     .map_err(|error| format!("pipe listener failed: {error:?}"))?;
     println!(
@@ -299,10 +303,14 @@ pub fn run_handoff_live(pipe_name: &str) -> Result<(), String> {
         64,
         pipe_transport::composition_gate_handler(),
         Some(provider),
+        Some(std::sync::Arc::new(std::sync::Mutex::new(
+            zonkey_service::transport::RecoveryRegistry::new(64)
+                .map_err(|_| "recovery capacity".to_owned())?,
+        ))),
     )
     .map_err(|error| format!("pipe listener failed: {error:?}"))?;
     println!(
-        "zonkey live handoff endpoint ready pipe={pipe_name} protocol=zonkey.host-transport/1 (Ctrl+C to stop)"
+        "live handoff endpoint ready pipe={pipe_name} protocol=zonkey.host-transport/1 (Ctrl+C to stop)"
     );
     let processor = zonkey_service::transport::SharedDecisionProcessor::new(state);
     let observe = native::run_observe_with_processor(processor);

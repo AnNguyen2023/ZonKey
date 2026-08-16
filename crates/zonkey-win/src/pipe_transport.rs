@@ -211,7 +211,7 @@ pub fn spawn_dummy_host_server(
     ledger_capacity: usize,
     handler: RequestHandler,
 ) -> Result<PipeServerHandle, PipeError> {
-    spawn_dummy_host_server_with_handoff(pipe_name, ledger_capacity, handler, None)
+    spawn_dummy_host_server_with_handoff(pipe_name, ledger_capacity, handler, None, None)
 }
 
 /// Read-only provider of the current validated handoff request (M3D-22).
@@ -240,8 +240,9 @@ pub fn handoff_payload(request: &zonkey_service::transport::HandoffRequest) -> S
     )
 }
 
-/// Spawns a dummy-host server that additionally answers read-only
-/// `HANDOFF` queries from a [`HandoffProvider`].
+/// Spawns a dummy-host server that additionally answers read-only `HANDOFF`
+/// queries from a [`HandoffProvider`] and operator `RECOVERY` commands from
+/// an optional shared [`RecoveryRegistry`].
 ///
 /// # Errors
 ///
@@ -256,6 +257,7 @@ pub fn spawn_dummy_host_server_with_handoff(
     ledger_capacity: usize,
     handler: RequestHandler,
     handoff: Option<HandoffProvider>,
+    recovery: Option<Arc<std::sync::Mutex<zonkey_service::transport::RecoveryRegistry>>>,
 ) -> Result<PipeServerHandle, PipeError> {
     let pipe_name = pipe_name.to_owned();
     let session_id = next_session_id();
@@ -298,6 +300,7 @@ pub fn spawn_dummy_host_server_with_handoff(
                 &thread_session,
                 &handler,
                 handoff.as_ref(),
+                recovery.as_ref(),
             );
             let _ = unsafe { DisconnectNamedPipe(handle) };
             if thread_stop.load(Ordering::Relaxed) {
@@ -323,6 +326,7 @@ fn serve_connection(
     session_id: &str,
     handler: &RequestHandler,
     handoff: Option<&HandoffProvider>,
+    recovery: Option<&Arc<std::sync::Mutex<zonkey_service::transport::RecoveryRegistry>>>,
 ) {
     let mut buffer: Vec<u8> = Vec::new();
     loop {
@@ -337,6 +341,13 @@ fn serve_connection(
                 }
             } else {
                 let _ = write_frame(handle, "ERROR|protocol_mismatch");
+                return;
+            }
+            continue;
+        }
+        if let Some(recovery_command) = payload.strip_prefix("RECOVERY|") {
+            let text = handle_recovery_command(endpoint, recovery_command, recovery);
+            if write_frame(handle, &format!("RESULT|DEFINITE|{text}")).is_err() {
                 return;
             }
             continue;
@@ -391,6 +402,99 @@ fn serve_connection(
         }
         // Unknown well-formed payloads are ignored fail-closed: drop.
         return;
+    }
+}
+
+/// Operator recovery commands (M3D-28), reusing the session-bound framing:
+/// `RECOVERY|<session>|LIST`, `RECOVERY|<session>|BLOCK|<uri>|<expected>|
+/// <replacement>|<start>|<end>`, `RECOVERY|<session>|RECONCILE|<uri>|
+/// <expected>|<live-range-text>`, and `RECOVERY|<session>|ACK|<uri>|
+/// <expected>`. Every answer is a definitive transport result; failures are
+/// `recovery-error:<reason>` strings, never mutations, never retries.
+fn handle_recovery_command(
+    endpoint: &HostTransportEndpoint,
+    command: &str,
+    recovery: Option<&Arc<std::sync::Mutex<zonkey_service::transport::RecoveryRegistry>>>,
+) -> String {
+    let mut parts = command.split('|');
+    let Some(command_session) = parts.next() else {
+        return "recovery-error:MalformedCommand".to_owned();
+    };
+    if endpoint.check_session(command_session).is_err() {
+        return "recovery-error:SessionMismatch".to_owned();
+    }
+    let Some(registry) = recovery else {
+        return "recovery-error:RecoveryUnavailable".to_owned();
+    };
+    let Ok(mut registry) = registry.lock() else {
+        return "recovery-error:RegistryLocked".to_owned();
+    };
+    match parts.next() {
+        Some("LIST") => {
+            let targets = registry.list();
+            let mut text = format!("recovery-list|{}", targets.len());
+            for target in targets {
+                let state = match target.state {
+                    None => "awaiting".to_owned(),
+                    Some((verdict, acknowledged)) => {
+                        format!("{verdict:?}|acked={acknowledged}")
+                    }
+                };
+                text.push('\u{1}');
+                text.push_str(&target.uri);
+                text.push('\u{1}');
+                text.push_str(&target.expected);
+                text.push('\u{1}');
+                text.push_str(&state);
+            }
+            text
+        }
+        Some("BLOCK") => {
+            let (Some(uri), Some(expected), Some(replacement), Some(start), Some(end)) = (
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+                parts.next(),
+            ) else {
+                return "recovery-error:MalformedCommand".to_owned();
+            };
+            let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
+                return "recovery-error:MalformedCommand".to_owned();
+            };
+            match registry.block(command_session, uri, expected, replacement, (start, end)) {
+                Some(evicted) => format!("recovery-blocked|evicted={evicted}"),
+                None => "recovery-blocked".to_owned(),
+            }
+        }
+        Some("RECONCILE") => {
+            let (Some(uri), Some(expected), Some(live)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                return "recovery-error:MalformedCommand".to_owned();
+            };
+            // The live range text may itself contain '|': rejoin the tail.
+            let tail: Vec<&str> = parts.collect();
+            let live = if tail.is_empty() {
+                live.to_owned()
+            } else {
+                format!("{live}|{}", tail.join("|"))
+            };
+            match registry.reconcile(command_session, uri, expected, &live) {
+                Ok(verdict) => format!("recovery-verdict:{verdict:?}"),
+                Err(error) => format!("recovery-error:{error:?}"),
+            }
+        }
+        Some("ACK") => {
+            let (Some(uri), Some(expected)) = (parts.next(), parts.next()) else {
+                return "recovery-error:MalformedCommand".to_owned();
+            };
+            match registry.acknowledge(command_session, uri, expected) {
+                Ok(()) => "recovery-acked".to_owned(),
+                Err(error) => format!("recovery-error:{error:?}"),
+            }
+        }
+        _ => "recovery-error:MalformedCommand".to_owned(),
     }
 }
 
@@ -610,6 +714,56 @@ impl PipeClient {
                     self.broken = true;
                     Err(PipeError::InvalidPayload(
                         "expected handoff result".to_owned(),
+                    ))
+                }
+            }
+            Err(PipeError::Timeout | PipeError::ConnectionLost) => {
+                self.broken = true;
+                Err(PipeError::Timeout)
+            }
+            Err(other) => {
+                self.broken = true;
+                Err(other)
+            }
+        }
+    }
+
+    /// Sends one operator `RECOVERY` command (without the `RECOVERY|`
+    /// prefix or session, which this method adds) and returns the result
+    /// payload text. Recovery commands never touch the request ledger and
+    /// never mutate documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport errors as [`PipeClient::request`].
+    pub fn recovery_command(
+        &mut self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<String, PipeError> {
+        if self.broken {
+            return Err(PipeError::ConnectionLost);
+        }
+        let handle = self.handle.ok_or(PipeError::ConnectionLost)?;
+        let session = self.session_id.clone();
+        if write_frame(handle, &format!("RECOVERY|{session}|{command}")).is_err() {
+            self.broken = true;
+            return Err(PipeError::ConnectionLost);
+        }
+        match read_frame_with_timeout(handle, timeout) {
+            Ok(frame) => {
+                if let Some(reason) = frame.payload.strip_prefix("ERROR|") {
+                    return Err(match reason {
+                        "session_mismatch" => PipeError::SessionMismatch,
+                        other => PipeError::HandshakeRefused(other.to_owned()),
+                    });
+                }
+                if let Some(text) = frame.payload.strip_prefix("RESULT|DEFINITE|") {
+                    Ok(text.to_owned())
+                } else {
+                    self.broken = true;
+                    Err(PipeError::InvalidPayload(
+                        "expected recovery result".to_owned(),
                     ))
                 }
             }
@@ -980,6 +1134,7 @@ mod tests {
             8,
             composition_gate_handler(),
             Some(provider),
+            None,
         )
         .expect("server");
         let mut client = connect(&server);
@@ -1007,6 +1162,7 @@ mod tests {
             8,
             composition_gate_handler(),
             Some(provider),
+            None,
         )
         .expect("server");
         let mut client = connect(&server);
@@ -1014,6 +1170,123 @@ mod tests {
             .handoff_query(Duration::from_secs(5))
             .expect("query answers");
         assert_eq!(payload, "handoff-rejected:NoCurrentPlan");
+        client.close();
+        server.shutdown();
+    }
+
+    #[test]
+    fn recovery_lifecycle_over_pipe() {
+        let name = pipe_name("recovery");
+        let registry = Arc::new(std::sync::Mutex::new(
+            zonkey_service::transport::RecoveryRegistry::new(4).expect("capacity"),
+        ));
+        let (handler, _calls) = counting_handler();
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            handler,
+            None,
+            Some(Arc::clone(&registry)),
+        )
+        .expect("server");
+        let mut client = connect(&server);
+        assert_eq!(
+            client.recovery_command("LIST", Duration::from_secs(5)),
+            Ok("recovery-list|0".to_owned())
+        );
+        assert_eq!(
+            client.recovery_command(
+                "BLOCK|file:///doc|resume|restored|0|6",
+                Duration::from_secs(5)
+            ),
+            Ok("recovery-blocked".to_owned())
+        );
+        let listed = client
+            .recovery_command("LIST", Duration::from_secs(5))
+            .expect("list");
+        assert!(listed.starts_with("recovery-list|1"), "list={listed}");
+        assert_eq!(
+            client.recovery_command("ACK|file:///doc|resume", Duration::from_secs(5)),
+            Ok("recovery-error:AckBeforeReconcile".to_owned())
+        );
+        assert_eq!(
+            client.recovery_command(
+                "RECONCILE|file:///doc|resume|resume",
+                Duration::from_secs(5)
+            ),
+            Ok("recovery-verdict:NotApplied".to_owned())
+        );
+        assert_eq!(
+            client.recovery_command(
+                "RECONCILE|file:///doc|resume|resume",
+                Duration::from_secs(5)
+            ),
+            Ok("recovery-verdict:NotApplied".to_owned())
+        );
+        assert_eq!(
+            client.recovery_command("ACK|file:///doc|resume", Duration::from_secs(5)),
+            Ok("recovery-acked".to_owned())
+        );
+        assert_eq!(
+            client.recovery_command("LIST", Duration::from_secs(5)),
+            Ok("recovery-list|0".to_owned())
+        );
+        // Close the first client so the single-instance pipe can accept
+        // the raw wrong-session connection.
+        client.close();
+        let handle = open_raw_handle(&server.pipe_name, Duration::from_secs(5)).expect("open");
+        write_frame(handle, "HELLO|zonkey.host-transport/1").expect("hello");
+        let welcome = read_frame_with_timeout(handle, HANDSHAKE_TIMEOUT).expect("welcome");
+        drop(welcome);
+        write_frame(handle, "RECOVERY|bogus-session|LIST").expect("send");
+        let reply = read_frame_with_timeout(handle, Duration::from_secs(5)).expect("reply");
+        assert_eq!(
+            reply.payload,
+            "RESULT|DEFINITE|recovery-error:SessionMismatch"
+        );
+        let _ = unsafe { CloseHandle(handle) };
+        server.shutdown();
+    }
+
+    #[test]
+    fn recovery_applied_and_conflict_verdicts_over_pipe() {
+        let name = pipe_name("recovery-verdicts");
+        let registry = Arc::new(std::sync::Mutex::new(
+            zonkey_service::transport::RecoveryRegistry::new(4).expect("capacity"),
+        ));
+        let (handler, _calls) = counting_handler();
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            handler,
+            None,
+            Some(Arc::clone(&registry)),
+        )
+        .expect("server");
+        let mut client = connect(&server);
+        client
+            .recovery_command("BLOCK|file:///a|t1|r1|0|2", Duration::from_secs(5))
+            .expect("block");
+        assert_eq!(
+            client.recovery_command("RECONCILE|file:///a|t1|r1", Duration::from_secs(5)),
+            Ok("recovery-verdict:AppliedAcknowledged".to_owned())
+        );
+        client
+            .recovery_command("ACK|file:///a|t1", Duration::from_secs(5))
+            .expect("ack");
+        client
+            .recovery_command("BLOCK|file:///b|t2|r2|0|2", Duration::from_secs(5))
+            .expect("block");
+        assert_eq!(
+            client.recovery_command(
+                "RECONCILE|file:///b|t2|zz|with|pipes",
+                Duration::from_secs(5)
+            ),
+            Ok("recovery-verdict:ConflictHumanReview".to_owned())
+        );
+        client
+            .recovery_command("ACK|file:///b|t2", Duration::from_secs(5))
+            .expect("ack");
         client.close();
         server.shutdown();
     }

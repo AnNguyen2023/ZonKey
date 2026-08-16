@@ -70,6 +70,15 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("recovery") => {
+            let arguments = std::env::args().skip(2).collect::<Vec<_>>();
+            if let Err(message) = run_recovery_command(&arguments) {
+                eprintln!(
+                    "usage: recovery --pipe <name> <list|block|reconcile|ack> [args] ({message})"
+                );
+                std::process::exit(2);
+            }
+        }
         _ => {
             println!(
                 "Zonkey: architecture and audit phase; use `observe-hook`, `observe-raw`, or `diagnose` for the Windows spikes."
@@ -94,6 +103,48 @@ fn parse_probe_args(arguments: &[String]) -> Result<(String, u64), &'static str>
         return Err("delay exceeds 30000ms");
     }
     Ok((expected, delay_ms))
+}
+
+/// Operator recovery tooling (M3D-28): connects to a running validation
+/// endpoint and performs one session-bound recovery command. Query/state
+/// only; never mutates documents.
+fn run_recovery_command(arguments: &[String]) -> Result<(), String> {
+    let mut pipe_name: Option<String> = None;
+    let mut rest: Vec<&str> = Vec::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] == "--pipe" && index + 1 < arguments.len() {
+            pipe_name = Some(arguments[index + 1].clone());
+            index += 2;
+        } else {
+            rest.push(arguments[index].as_str());
+            index += 1;
+        }
+    }
+    let pipe_name = pipe_name.ok_or("pipe name is required")?;
+    if !pipe_name.starts_with(r"\\.\pipe\") {
+        return Err("pipe name must be a local named pipe path".to_owned());
+    }
+    let command = match rest.as_slice() {
+        ["list"] => "LIST".to_owned(),
+        ["block", uri, expected, replacement, start, end] => {
+            if start.parse::<usize>().is_err() || end.parse::<usize>().is_err() {
+                return Err("range must be integers".to_owned());
+            }
+            format!("BLOCK|{uri}|{expected}|{replacement}|{start}|{end}")
+        }
+        ["reconcile", uri, expected, live] => {
+            format!("RECONCILE|{uri}|{expected}|{live}")
+        }
+        ["ack", uri, expected] => format!("ACK|{uri}|{expected}"),
+        _ => return Err("unknown recovery command".to_owned()),
+    };
+    zonkey_win::pipe_transport::PipeClient::connect(&pipe_name, std::time::Duration::from_secs(8))
+        .and_then(|mut client| client.recovery_command(&command, std::time::Duration::from_secs(8)))
+        .map(|answer| {
+            println!("recovery_answer={answer}");
+        })
+        .map_err(|error| format!("recovery command failed: {error:?}"))
 }
 
 fn parse_serve_args(
