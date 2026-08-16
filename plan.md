@@ -688,6 +688,30 @@ rather than wrapping or reusing identity.
   duplicates replay, and the document is untouched.
 - No mutation, no Applied path, no composition bypass. See ADR 0027.
 
+#### M3D-23 - Live observer to handoff to transport E2E - DONE
+
+- `SharedDecisionState`/`SharedDecisionProcessor` in
+  `zonkey-service::transport` share the one real decision processor between
+  the unchanged `WH_KEYBOARD_LL` observer loop and the pipe endpoint's
+  handoff provider; no second input pipeline exists. Wiring tests re-verify
+  injected-event exclusion, shortcut isolation, discontinuity resets,
+  Keep/Ambiguous producing no request, only-current-eligible handoff, and
+  deterministic `handoff-<generation>` identity. The host keeps owning the
+  UTF-16 range.
+- `zonkey-cli handoff-live` runs the live endpoint. The owner's first
+  manual run exposed a self-invalidating 3-terminal race (the keystrokes
+  needed to launch E2E were observed by the global hook and invalidated the
+  handoff); the fixed single-command harness `npm run smoke:m3d23`
+  pre-starts everything, polls for the live handoff, and on the first
+  `HANDOFF_OBSERVED` closes its poll connection and runs the real VS Code
+  validation automatically, ending at `rejected:CompositionUnknown` with an
+  untouched document. A labeled `--scripted-tooling-check` proves harness
+  mechanics only.
+- Owner live smoke PASSED (2026-08-16): real physical keyboard, live
+  `RestoreCandidate` (`handoff:handoff-1|réume|resume|5|6|1`), real pipe +
+  real VS Code, `M3D23_LIVE_SMOKE_OK` exit 0, no SendInput or scripted feed
+  as evidence, document unchanged. See ADR 0028.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

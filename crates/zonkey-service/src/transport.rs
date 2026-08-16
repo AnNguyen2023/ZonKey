@@ -15,6 +15,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use crate::EventProcessor as _;
+
 /// Protocol identity required at hello time on both endpoints.
 pub const TRANSPORT_PROTOCOL_ID: &str = "zonkey.host-transport/1";
 
@@ -499,6 +501,98 @@ pub fn feed_token(
     });
 }
 
+/// Shared live decision state for the M3D-23 live observer wiring.
+///
+/// The real observer path (`WH_KEYBOARD_LL` → `ObserveService` →
+/// `DiagnosticDecisionProcessor`) forwards events here while a pipe endpoint
+/// reads the current validated handoff from another thread. All decision
+/// semantics stay owned by [`crate::DiagnosticDecisionProcessor`]; this type
+/// only shares it and maps the current handoff into a [`HandoffRequest`].
+pub struct SharedDecisionState {
+    processor: std::sync::Mutex<crate::DiagnosticDecisionProcessor>,
+}
+
+impl Default for SharedDecisionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedDecisionState {
+    /// Creates an empty shared decision state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            processor: std::sync::Mutex::new(crate::DiagnosticDecisionProcessor::default()),
+        }
+    }
+
+    /// Processes one observed event under the shared lock.
+    pub fn process(
+        &self,
+        event: &zonkey_types::ObservedInputEvent,
+    ) -> crate::ProcessorClassification {
+        self.processor
+            .lock()
+            .map_or(crate::ProcessorClassification::Invalid, |mut processor| {
+                processor.process(event)
+            })
+    }
+
+    /// Resets the token lifecycle after a queue discontinuity.
+    pub fn reset_after_discontinuity(&self) {
+        if let Ok(mut processor) = self.processor.lock() {
+            processor.reset_after_discontinuity();
+        }
+    }
+
+    /// Maps the *current* handoff (never a stale snapshot) into a host
+    /// request; `Keep`, `Ambiguous`, injected input, and discontinuity paths
+    /// naturally produce no handoff and reject here.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`HandoffRequestError`] when no current eligible handoff
+    /// exists or the internal gate refuses it.
+    pub fn current_handoff_request(&self) -> Result<HandoffRequest, HandoffRequestError> {
+        let processor = self
+            .processor
+            .lock()
+            .map_err(|_| HandoffRequestError::InternalGateFailed)?;
+        let handoff = processor
+            .current_restore_handoff()
+            .ok_or(HandoffRequestError::NoCurrentPlan)?;
+        build_host_request(&processor, &handoff)
+    }
+}
+
+/// `EventProcessor` view over [`SharedDecisionState`] for the observer loop.
+#[derive(Clone)]
+pub struct SharedDecisionProcessor {
+    state: std::sync::Arc<SharedDecisionState>,
+}
+
+impl SharedDecisionProcessor {
+    /// Wraps shared state for the observer service loop.
+    #[must_use]
+    pub fn new(state: std::sync::Arc<SharedDecisionState>) -> Self {
+        Self { state }
+    }
+}
+
+impl crate::EventProcessor for SharedDecisionProcessor {
+    fn reset_after_discontinuity(&mut self) {
+        self.state.reset_after_discontinuity();
+    }
+
+    fn process(
+        &mut self,
+        event: &zonkey_types::ObservedInputEvent,
+    ) -> crate::ProcessorClassification {
+        self.state.process(event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,5 +971,147 @@ mod tests {
             HostTransportEndpoint::new(0),
             Err(LedgerCapacityError)
         ));
+    }
+
+    fn live_event(
+        sequence: u64,
+        key: zonkey_types::ObservedKey,
+        injection_origin: zonkey_types::InjectionOrigin,
+    ) -> zonkey_types::ObservedInputEvent {
+        zonkey_types::ObservedInputEvent {
+            key,
+            kind: zonkey_types::KeyEventKind::KeyDown,
+            modifiers: zonkey_types::ModifierState::new(),
+            injection_origin,
+            sequence: zonkey_types::EventSequence::new(sequence).expect("sequence is non-zero"),
+        }
+    }
+
+    fn live_letter(state: &SharedDecisionState, sequence: u64, character: char) {
+        let key = zonkey_types::ObservedKey::letter(character).expect("ASCII letter");
+        state.process(&live_event(
+            sequence,
+            key,
+            zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+        ));
+    }
+
+    fn live_space(state: &SharedDecisionState, sequence: u64) {
+        state.process(&live_event(
+            sequence,
+            zonkey_types::ObservedKey::space(),
+            zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+        ));
+    }
+
+    #[test]
+    fn live_wiring_maps_current_restore_candidate() {
+        let state = std::sync::Arc::new(SharedDecisionState::new());
+        let mut sequence = 1;
+        for character in "resume".chars() {
+            live_letter(&state, sequence, character);
+            sequence += 1;
+        }
+        // Negative first: before the boundary there is no current handoff.
+        assert_eq!(
+            state.current_handoff_request(),
+            Err(HandoffRequestError::NoCurrentPlan)
+        );
+        live_space(&state, sequence);
+        let request = state.current_handoff_request().expect("live handoff");
+        assert_eq!(request.request_id, "handoff-1");
+        assert!(!request.rendered_token.is_empty());
+        assert!(!request.replacement_token.is_empty());
+        assert_eq!(
+            request.rendered_units,
+            request.rendered_token.chars().count()
+        );
+    }
+
+    #[test]
+    fn live_writing_second_candidate_advances_generation_deterministically() {
+        let state = std::sync::Arc::new(SharedDecisionState::new());
+        feed_live_token(&state, "resume", 1);
+        let first = state.current_handoff_request().expect("first handoff");
+        feed_live_token(&state, "config", 10);
+        let second = state.current_handoff_request().expect("second handoff");
+        assert_eq!(first.request_id, "handoff-1");
+        assert_eq!(second.request_id, "handoff-2");
+    }
+
+    #[test]
+    fn live_keep_and_ambiguous_produce_no_request() {
+        for token in ["dungf", "hello"] {
+            let state = std::sync::Arc::new(SharedDecisionState::new());
+            feed_live_token(&state, token, 1);
+            assert_eq!(
+                state.current_handoff_request(),
+                Err(HandoffRequestError::NoCurrentPlan),
+                "token {token} must not produce a live request"
+            );
+        }
+    }
+
+    #[test]
+    fn live_injected_events_do_not_produce_request() {
+        let state = std::sync::Arc::new(SharedDecisionState::new());
+        let mut sequence = 1;
+        for character in "resume".chars() {
+            let key = zonkey_types::ObservedKey::letter(character).expect("ASCII letter");
+            state.process(&live_event(
+                sequence,
+                key,
+                zonkey_types::InjectionOrigin::MarkedInjected,
+            ));
+            sequence += 1;
+        }
+        live_space(&state, sequence);
+        assert_eq!(
+            state.current_handoff_request(),
+            Err(HandoffRequestError::NoCurrentPlan)
+        );
+    }
+
+    #[test]
+    fn live_shortcut_modifier_keys_do_not_mutate_token() {
+        let state = std::sync::Arc::new(SharedDecisionState::new());
+        live_letter(&state, 1, 'r');
+        // A Ctrl+r shortcut event must be ignored by the decision processor.
+        state.process(&zonkey_types::ObservedInputEvent {
+            key: zonkey_types::ObservedKey::letter('r').expect("ASCII letter"),
+            kind: zonkey_types::KeyEventKind::KeyDown,
+            modifiers: zonkey_types::ModifierState::new().with_control(true),
+            injection_origin: zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+            sequence: zonkey_types::EventSequence::new(2).expect("sequence is non-zero"),
+        });
+        for (sequence, character) in (3..).zip("esume".chars()) {
+            live_letter(&state, sequence, character);
+        }
+        live_space(&state, 8);
+        // The Ctrl-modified event did not append to the token; the typed
+        // token "resume" still yields the first generation.
+        let request = state.current_handoff_request().expect("shortcut isolation");
+        assert_eq!(request.request_id, "handoff-1");
+    }
+
+    #[test]
+    fn live_discontinuity_resets_lifecycle() {
+        let state = std::sync::Arc::new(SharedDecisionState::new());
+        feed_live_token(&state, "resume", 1);
+        assert!(state.current_handoff_request().is_ok());
+        state.reset_after_discontinuity();
+        assert_eq!(
+            state.current_handoff_request(),
+            Err(HandoffRequestError::NoCurrentPlan)
+        );
+    }
+
+    fn feed_live_token(state: &std::sync::Arc<SharedDecisionState>, token: &str, start: u64) {
+        let mut sequence = start;
+        for character in token.chars() {
+            live_letter(state, sequence, character);
+            sequence += 1;
+        }
+        live_space(state, sequence);
     }
 }

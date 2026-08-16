@@ -276,6 +276,40 @@ pub fn run_serve_host_validation(
     Ok(())
 }
 
+/// Runs the M3D-23 live observer → handoff → transport endpoint. The real
+/// `WH_KEYBOARD_LL` observer feeds the shared decision processor (the only
+/// input pipeline; nothing is scripted), while the pipe endpoint serves the
+/// current validated handoff. Observe/query/reject only; Ctrl+C stops.
+///
+/// # Errors
+///
+/// Returns a sanitized error when the pipe listener cannot start or the
+/// observer fails.
+#[cfg(windows)]
+pub fn run_handoff_live(pipe_name: &str) -> Result<(), String> {
+    let state = std::sync::Arc::new(zonkey_service::transport::SharedDecisionState::new());
+    let provider_state = std::sync::Arc::clone(&state);
+    let provider: pipe_transport::HandoffProvider = std::sync::Arc::new(move || {
+        provider_state
+            .current_handoff_request()
+            .map_err(|error| pipe_transport::HandoffRequestWireError(format!("{error:?}")))
+    });
+    let server = pipe_transport::spawn_dummy_host_server_with_handoff(
+        pipe_name,
+        64,
+        pipe_transport::composition_gate_handler(),
+        Some(provider),
+    )
+    .map_err(|error| format!("pipe listener failed: {error:?}"))?;
+    println!(
+        "zonkey live handoff endpoint ready pipe={pipe_name} protocol=zonkey.host-transport/1 (Ctrl+C to stop)"
+    );
+    let processor = zonkey_service::transport::SharedDecisionProcessor::new(state);
+    let observe = native::run_observe_with_processor(processor);
+    server.shutdown();
+    observe.map_err(std::string::ToString::to_string)
+}
+
 /// Runs the Windows observe-only Raw Input comparison spike.
 ///
 /// # Errors

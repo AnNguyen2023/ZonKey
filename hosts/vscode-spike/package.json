@@ -26,9 +26,14 @@
     "compile:test": "esbuild integration/real-vscode.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/real-vscode-validation.cjs",
     "compile:transport": "esbuild integration/real-vscode-transport.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/transport-validation.cjs",
     "compile:handoff": "esbuild integration/real-vscode-handoff.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/handoff-validation.cjs",
+    "compile:handoff-live": "esbuild integration/real-vscode-handoff-live.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/handoff-live-validation.cjs",
     "test:real": "npm run compile && npm run compile:test && node scripts/run-real-vscode.mjs",
     "test:transport": "npm run compile:transport && node scripts/run-transport-integration.mjs",
-    "test:handoff": "npm run compile:handoff && node scripts/run-handoff-integration.mjs"
+    "test:handoff": "npm run compile:handoff && node scripts/run-handoff-integration.mjs",
+    "probe:handoff-live": "node scripts/handoff-live-probe.mjs",
+    "smoke:m3d23": "npm run compile:handoff-live && node scripts/run-m3d23-smoke.mjs",
+    "smoke:m3d23-tooling": "npm run compile:handoff-live && node scripts/run-m3d23-smoke.mjs --scripted-tooling-check",
+    "test:handoff-live": "npm run compile:handoff-live && node scripts/run-handoff-live-integration.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

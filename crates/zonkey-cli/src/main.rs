@@ -56,6 +56,20 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("handoff-live") => {
+            let arguments = std::env::args().skip(2).collect::<Vec<_>>();
+            let (pipe_name, _, _) = match parse_serve_args(&arguments) {
+                Ok(value) => value,
+                Err(message) => {
+                    eprintln!("usage: handoff-live --pipe <name> ({message})");
+                    std::process::exit(2);
+                }
+            };
+            if let Err(error) = zonkey_win::run_handoff_live(&pipe_name) {
+                eprintln!("Zonkey live handoff endpoint failed: {error}");
+                std::process::exit(1);
+            }
+        }
         _ => {
             println!(
                 "Zonkey: architecture and audit phase; use `observe-hook`, `observe-raw`, or `diagnose` for the Windows spikes."
