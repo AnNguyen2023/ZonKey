@@ -767,6 +767,22 @@ rather than wrapping or reusing identity.
   binding is untouched and still returns `CompositionUnknown`; no mutation
   path exists in production. See ADR 0031.
 
+#### M3D-27 - Production hardening priority review - DONE
+
+- Design-only classification of the remaining areas: composition evidence
+  and recovery-policy approval/tooling are the two BLOCKS_REAL_APPLIED
+  items; pipe ACL/authentication, per-boot pipe identity, ledger
+  sizing/persistence, host/session identity hardening, and
+  startup/packaging/VSIX gate the release; reconnect/multi-client,
+  diagnostics/privacy, and reconciliation UX are SHOULD_HARDEN; nothing is
+  currently DEFER. Real Applied stays disabled and `CompositionUnknown`
+  stays fail-closed.
+- Next milestone chosen (exactly one): M3D-28 production reconciliation and
+  recovery tooling — the only Applied-blocking item fully within our
+  control, converting the ADR 0030 recovery workflow into transport-grade
+  reconcile/readback and owner-ack tooling without any mutation. See ADR
+  0032.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
