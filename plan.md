@@ -726,6 +726,28 @@ rather than wrapping or reusing identity.
   the recovery policy is approved. No mutation is designed or implemented in
   M3D-24. See ADR 0029.
 
+#### M3D-25 - Controlled mutation design - IN PROGRESS
+
+- Design-only contract for any future cooperating-host `Applied`: a
+  fixed-order eligibility checklist (protocol/session/host/document/editor
+  identity, revalidated current handoff and internal gate, local ordinary
+  file document, one empty caret, host-owned UTF-16 range with exact
+  expected text and matching version, `KnownNonSecure`, `SupportedLocal`,
+  proven-Inactive composition with `CAP_COMPOSITION_PROOF`, valid
+  idempotent request id, well-formed replacement) where any unknown or
+  mismatch rejects; a one-transaction compare-and-replace with immediate
+  pre-transaction re-read and post-commit verification (`Applied` only when
+  transaction accepted, range/text matched at transaction time, exact
+  replacement committed, and verification consistent); and an
+  `Indeterminate` recovery policy (never auto-retry, ledger replay for
+  duplicates, unproven outcomes stay Indeterminate, an explicit
+  owner-acknowledged reconciliation readback before any new request for the
+  same logical target, no best-guess retry).
+- Real VS Code composition remains `Unknown`, so real Applied stays
+  disabled (`Rejected(CompositionUnknown)`); the proven-Inactive
+  precondition is defined, not invented. No mutation is implemented. See
+  ADR 0030.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
