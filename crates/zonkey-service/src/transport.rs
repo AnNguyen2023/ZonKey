@@ -379,6 +379,126 @@ pub fn composition_gate_outcome(composition: &str) -> LedgerOutcome {
     }
 }
 
+/// Fields of a validated restore handoff mapped toward a host request (M3D-22).
+///
+/// The mapping deliberately excludes any host-native position or range: the
+/// UTF-16 range, caret, and document identity remain owned by the host
+/// snapshot/adapter. `request_id` is derived deterministically from the plan
+/// generation so ledger idempotency follows naturally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffRequest {
+    /// Deterministic identity: `handoff-<generation>`.
+    pub request_id: String,
+    /// Token currently rendered by Telex.
+    pub rendered_token: String,
+    /// Replacement text chosen by policy.
+    pub replacement_token: String,
+    /// Unicode scalar length of the rendered token.
+    pub rendered_units: usize,
+    /// Unicode scalar length of the replacement token.
+    pub replacement_units: usize,
+    /// Service-local plan generation at capture time.
+    pub generation: u64,
+}
+
+/// Fail-closed reasons a handoff never reaches the transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandoffRequestError {
+    /// No current plan or handoff exists.
+    NoCurrentPlan,
+    /// The submitted handoff no longer matches service state.
+    StaleHandoff,
+    /// The submitted generation disagrees with the current plan.
+    GenerationMismatch,
+    /// Logical span lengths disagree with the token values.
+    MalformedSpan,
+    /// The internal execution gate refused the handoff.
+    InternalGateFailed,
+}
+
+/// Maps a submitted [`RestorePlanHandoff`] through revalidation and the
+/// internal execution gate into a [`HandoffRequest`]. Every failure mode
+/// rejects before any transport involvement; this function never authorizes
+/// mutation and derives no host-native ranges.
+///
+/// # Errors
+///
+/// Returns a [`HandoffRequestError`] for every non-passing gate outcome.
+pub fn build_host_request(
+    processor: &crate::DiagnosticDecisionProcessor,
+    submitted: &crate::RestorePlanHandoff,
+) -> Result<HandoffRequest, HandoffRequestError> {
+    use crate::InternalExecutionGate::Rejected;
+    use crate::InternalGateRejection::{
+        GenerationMismatch as GateGenerationMismatch, HandoffMalformed, HandoffStale,
+        InternalSpanInconsistent, NoCurrentHandoff, NoCurrentPlan as GateNoCurrentPlan,
+        PlanIneligible, SimulationInvariantBroken,
+    };
+    if processor.current_restore_handoff().is_none() {
+        return Err(HandoffRequestError::NoCurrentPlan);
+    }
+    if let Rejected(reason) = processor.evaluate_internal_execution_gate(submitted) {
+        return Err(match reason {
+            GateNoCurrentPlan | PlanIneligible => HandoffRequestError::NoCurrentPlan,
+            NoCurrentHandoff | HandoffStale => HandoffRequestError::StaleHandoff,
+            GateGenerationMismatch => HandoffRequestError::GenerationMismatch,
+            HandoffMalformed | InternalSpanInconsistent => HandoffRequestError::MalformedSpan,
+            SimulationInvariantBroken => HandoffRequestError::InternalGateFailed,
+        });
+    }
+    if submitted.rendered_token.is_empty()
+        || submitted.replacement_token.is_empty()
+        || submitted.rendered_units_to_replace != submitted.rendered_token.chars().count()
+        || submitted.replacement_units != submitted.replacement_token.chars().count()
+    {
+        return Err(HandoffRequestError::MalformedSpan);
+    }
+    Ok(HandoffRequest {
+        request_id: format!("handoff-{}", submitted.generation),
+        rendered_token: submitted.rendered_token.clone(),
+        replacement_token: submitted.replacement_token.clone(),
+        rendered_units: submitted.rendered_units_to_replace,
+        replacement_units: submitted.replacement_units,
+        generation: submitted.generation,
+    })
+}
+
+/// Feeds an ASCII token followed by a space boundary into the processor's
+/// decision pipeline. Used by tests and the validation endpoint to produce
+/// real plans from the real detection/policy path.
+///
+/// # Panics
+///
+/// Panics when `token` contains a non-ASCII-letter character; callers
+/// validate tokens beforehand.
+pub fn feed_token(
+    processor: &mut crate::DiagnosticDecisionProcessor,
+    token: &str,
+    start_sequence: u64,
+) {
+    use crate::EventProcessor;
+    let mut sequence = start_sequence;
+    for character in token.chars() {
+        let key = zonkey_types::ObservedKey::letter(character)
+            .expect("token characters are ASCII letters");
+        processor.process(&zonkey_types::ObservedInputEvent {
+            key,
+            kind: zonkey_types::KeyEventKind::KeyDown,
+            modifiers: zonkey_types::ModifierState::new(),
+            injection_origin: zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+            sequence: zonkey_types::EventSequence::new(sequence).expect("sequence is non-zero"),
+        });
+        sequence += 1;
+    }
+    processor.process(&zonkey_types::ObservedInputEvent {
+        key: zonkey_types::ObservedKey::space(),
+        kind: zonkey_types::KeyEventKind::KeyDown,
+        modifiers: zonkey_types::ModifierState::new(),
+        injection_origin: zonkey_types::InjectionOrigin::PhysicalOrUnmarked,
+        sequence: zonkey_types::EventSequence::new(sequence).expect("sequence is non-zero"),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +679,120 @@ mod tests {
         assert_eq!(
             composition_gate_outcome("anything-else"),
             LedgerOutcome::Definite("rejected:CompositionUnknown".into())
+        );
+    }
+
+    fn processor_with(token: &str) -> crate::DiagnosticDecisionProcessor {
+        let mut processor = crate::DiagnosticDecisionProcessor::default();
+        feed_token(&mut processor, token, 1);
+        processor
+    }
+
+    #[test]
+    fn valid_restore_candidate_creates_request_with_deterministic_id() {
+        let processor = processor_with("resume");
+        let handoff = processor
+            .current_restore_handoff()
+            .expect("resume produces a handoff");
+        let request = build_host_request(&processor, &handoff).expect("valid handoff maps");
+        assert_eq!(
+            request.request_id,
+            format!("handoff-{}", handoff.generation)
+        );
+        assert_eq!(request.rendered_token, handoff.rendered_token);
+        assert_eq!(request.replacement_token, handoff.replacement_token);
+        assert_eq!(
+            request.rendered_units,
+            request.rendered_token.chars().count()
+        );
+        assert_eq!(
+            request.replacement_units,
+            request.replacement_token.chars().count()
+        );
+        assert_eq!(request.generation, handoff.generation);
+        // No host-native range or caret field exists on the request.
+        let again = build_host_request(&processor, &handoff).expect("rebuild maps");
+        assert_eq!(again.request_id, request.request_id);
+    }
+
+    #[test]
+    fn keep_and_ambiguous_create_no_request() {
+        for token in ["dungf", "hello"] {
+            let processor = processor_with(token);
+            let submitted = crate::RestorePlanHandoff {
+                rendered_token: token.to_owned(),
+                replacement_token: token.to_owned(),
+                rendered_units_to_replace: token.chars().count(),
+                replacement_units: token.chars().count(),
+                reason: zonkey_types::DecisionReason::ExactEnglishDictionary,
+                generation: 1,
+                simulation_only: true,
+            };
+            assert_eq!(
+                build_host_request(&processor, &submitted),
+                Err(HandoffRequestError::NoCurrentPlan),
+                "token {token} must not produce a request"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_handoff_after_replacement_rejects() {
+        let mut processor = processor_with("resume");
+        let stale = processor
+            .current_restore_handoff()
+            .expect("initial handoff");
+        feed_token(&mut processor, "config", 10);
+        assert_eq!(
+            build_host_request(&processor, &stale),
+            Err(HandoffRequestError::GenerationMismatch)
+        );
+    }
+
+    #[test]
+    fn generation_mismatch_rejects() {
+        let processor = processor_with("resume");
+        let mut submitted = processor
+            .current_restore_handoff()
+            .expect("current handoff");
+        submitted.generation += 1;
+        assert_eq!(
+            build_host_request(&processor, &submitted),
+            Err(HandoffRequestError::GenerationMismatch)
+        );
+    }
+
+    #[test]
+    fn malformed_span_rejects() {
+        let processor = processor_with("resume");
+        let mut submitted = processor
+            .current_restore_handoff()
+            .expect("current handoff");
+        submitted.rendered_units_to_replace += 1;
+        assert_eq!(
+            build_host_request(&processor, &submitted),
+            Err(HandoffRequestError::MalformedSpan)
+        );
+    }
+
+    #[test]
+    fn simulation_invariant_failure_maps_to_gate_failure() {
+        let processor = processor_with("resume");
+        let genuine = processor
+            .current_restore_handoff()
+            .expect("current handoff");
+        let broken = crate::RestorePlanHandoff {
+            rendered_token: genuine.rendered_token.clone(),
+            replacement_token: genuine.replacement_token.clone(),
+            rendered_units_to_replace: genuine.rendered_units_to_replace,
+            replacement_units: genuine.replacement_units,
+            reason: genuine.reason.clone(),
+            generation: genuine.generation,
+            simulation_only: false,
+        };
+        assert_eq!(
+            build_host_request(&processor, &broken),
+            Err(HandoffRequestError::InternalGateFailed)
         );
     }
 

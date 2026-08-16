@@ -25,8 +25,10 @@
     "compile": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.cjs",
     "compile:test": "esbuild integration/real-vscode.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/real-vscode-validation.cjs",
     "compile:transport": "esbuild integration/real-vscode-transport.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/transport-validation.cjs",
+    "compile:handoff": "esbuild integration/real-vscode-handoff.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/handoff-validation.cjs",
     "test:real": "npm run compile && npm run compile:test && node scripts/run-real-vscode.mjs",
-    "test:transport": "npm run compile:transport && node scripts/run-transport-integration.mjs"
+    "test:transport": "npm run compile:transport && node scripts/run-transport-integration.mjs",
+    "test:handoff": "npm run compile:handoff && node scripts/run-handoff-integration.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

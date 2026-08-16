@@ -38,16 +38,20 @@ fn main() {
         }
         Some("serve-host-validation") => {
             let arguments = std::env::args().skip(2).collect::<Vec<_>>();
-            let (pipe_name, max_seconds) = match parse_serve_args(&arguments) {
+            let (pipe_name, max_seconds, handoff_token) = match parse_serve_args(&arguments) {
                 Ok(value) => value,
                 Err(message) => {
                     eprintln!(
-                        "usage: serve-host-validation --pipe <name> [--max-seconds <n>] ({message})"
+                        "usage: serve-host-validation --pipe <name> [--max-seconds <n>] [--handoff-token <letters>] ({message})"
                     );
                     std::process::exit(2);
                 }
             };
-            if let Err(error) = zonkey_win::run_serve_host_validation(&pipe_name, max_seconds) {
+            if let Err(error) = zonkey_win::run_serve_host_validation(
+                &pipe_name,
+                max_seconds,
+                handoff_token.as_deref(),
+            ) {
                 eprintln!("Zonkey host-validation endpoint failed: {error}");
                 std::process::exit(1);
             }
@@ -78,9 +82,12 @@ fn parse_probe_args(arguments: &[String]) -> Result<(String, u64), &'static str>
     Ok((expected, delay_ms))
 }
 
-fn parse_serve_args(arguments: &[String]) -> Result<(String, Option<u64>), &'static str> {
+fn parse_serve_args(
+    arguments: &[String],
+) -> Result<(String, Option<u64>, Option<String>), &'static str> {
     let mut pipe_name: Option<String> = None;
     let mut max_seconds: Option<u64> = None;
+    let mut handoff_token: Option<String> = None;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -96,6 +103,14 @@ fn parse_serve_args(arguments: &[String]) -> Result<(String, Option<u64>), &'sta
                 );
                 index += 2;
             }
+            "--handoff-token" if index + 1 < arguments.len() => {
+                let token = arguments[index + 1].clone();
+                if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphabetic()) {
+                    return Err("handoff token must be non-empty ASCII letters");
+                }
+                handoff_token = Some(token);
+                index += 2;
+            }
             _ => return Err("unsupported option"),
         }
     }
@@ -103,7 +118,7 @@ fn parse_serve_args(arguments: &[String]) -> Result<(String, Option<u64>), &'sta
     if !pipe_name.starts_with(r"\\.\pipe\") {
         return Err("pipe name must be a local named pipe path");
     }
-    Ok((pipe_name, max_seconds))
+    Ok((pipe_name, max_seconds, handoff_token))
 }
 
 #[cfg(windows)]

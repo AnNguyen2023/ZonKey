@@ -211,6 +211,52 @@ pub fn spawn_dummy_host_server(
     ledger_capacity: usize,
     handler: RequestHandler,
 ) -> Result<PipeServerHandle, PipeError> {
+    spawn_dummy_host_server_with_handoff(pipe_name, ledger_capacity, handler, None)
+}
+
+/// Read-only provider of the current validated handoff request (M3D-22).
+pub type HandoffProvider = Arc<
+    dyn Fn() -> Result<zonkey_service::transport::HandoffRequest, HandoffRequestWireError>
+        + Send
+        + Sync,
+>;
+
+/// Wire form of a handoff provider failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HandoffRequestWireError(pub String);
+
+/// Encodes a handoff query answer as a transport result payload. Fields are
+/// delimiter-separated and must not contain `|`.
+#[must_use]
+pub fn handoff_payload(request: &zonkey_service::transport::HandoffRequest) -> String {
+    format!(
+        "handoff:{}|{}|{}|{}|{}|{}",
+        request.request_id,
+        request.rendered_token,
+        request.replacement_token,
+        request.rendered_units,
+        request.replacement_units,
+        request.generation
+    )
+}
+
+/// Spawns a dummy-host server that additionally answers read-only
+/// `HANDOFF` queries from a [`HandoffProvider`].
+///
+/// # Errors
+///
+/// Returns [`PipeError::ConnectTimeout`] when the listener cannot start.
+///
+/// # Panics
+///
+/// Never panics on the caller's thread; invalid capacity silently stops the
+/// listener thread and surfaces as the connect-timeout error.
+pub fn spawn_dummy_host_server_with_handoff(
+    pipe_name: &str,
+    ledger_capacity: usize,
+    handler: RequestHandler,
+    handoff: Option<HandoffProvider>,
+) -> Result<PipeServerHandle, PipeError> {
     let pipe_name = pipe_name.to_owned();
     let session_id = next_session_id();
     let stop = Arc::new(AtomicBool::new(false));
@@ -246,7 +292,13 @@ pub fn spawn_dummy_host_server(
             if unsafe { ConnectNamedPipe(handle, None) }.is_err() {
                 break;
             }
-            serve_connection(handle, &mut endpoint, &thread_session, &handler);
+            serve_connection(
+                handle,
+                &mut endpoint,
+                &thread_session,
+                &handler,
+                handoff.as_ref(),
+            );
             let _ = unsafe { DisconnectNamedPipe(handle) };
             if thread_stop.load(Ordering::Relaxed) {
                 break;
@@ -270,6 +322,7 @@ fn serve_connection(
     endpoint: &mut HostTransportEndpoint,
     session_id: &str,
     handler: &RequestHandler,
+    handoff: Option<&HandoffProvider>,
 ) {
     let mut buffer: Vec<u8> = Vec::new();
     loop {
@@ -284,6 +337,26 @@ fn serve_connection(
                 }
             } else {
                 let _ = write_frame(handle, "ERROR|protocol_mismatch");
+                return;
+            }
+            continue;
+        }
+        if let Some(query_session) = payload.strip_prefix("HANDOFF|") {
+            if endpoint.check_session(query_session).is_err() {
+                if write_frame(handle, "ERROR|session_mismatch").is_err() {
+                    return;
+                }
+                continue;
+            }
+            // Read-only query: it never touches the request ledger.
+            let text = match handoff {
+                Some(provider) => match provider() {
+                    Ok(request) => handoff_payload(&request),
+                    Err(error) => format!("handoff-rejected:{}", error.0),
+                },
+                None => "handoff-unavailable".to_owned(),
+            };
+            if write_frame(handle, &format!("RESULT|DEFINITE|{text}")).is_err() {
                 return;
             }
             continue;
@@ -494,6 +567,50 @@ impl PipeClient {
                         self.broken = true;
                         Err(error)
                     }
+                }
+            }
+            Err(PipeError::Timeout | PipeError::ConnectionLost) => {
+                self.broken = true;
+                Err(PipeError::Timeout)
+            }
+            Err(other) => {
+                self.broken = true;
+                Err(other)
+            }
+        }
+    }
+
+    /// Sends one read-only `HANDOFF` query and returns the result payload
+    /// text. The query never touches the request ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport errors as [`PipeClient::request`].
+    pub fn handoff_query(&mut self, timeout: Duration) -> Result<String, PipeError> {
+        if self.broken {
+            return Err(PipeError::ConnectionLost);
+        }
+        let handle = self.handle.ok_or(PipeError::ConnectionLost)?;
+        let session = self.session_id.clone();
+        if write_frame(handle, &format!("HANDOFF|{session}")).is_err() {
+            self.broken = true;
+            return Err(PipeError::ConnectionLost);
+        }
+        match read_frame_with_timeout(handle, timeout) {
+            Ok(frame) => {
+                if let Some(reason) = frame.payload.strip_prefix("ERROR|") {
+                    return Err(match reason {
+                        "session_mismatch" => PipeError::SessionMismatch,
+                        other => PipeError::HandshakeRefused(other.to_owned()),
+                    });
+                }
+                if let Some(text) = frame.payload.strip_prefix("RESULT|DEFINITE|") {
+                    Ok(text.to_owned())
+                } else {
+                    self.broken = true;
+                    Err(PipeError::InvalidPayload(
+                        "expected handoff result".to_owned(),
+                    ))
                 }
             }
             Err(PipeError::Timeout | PipeError::ConnectionLost) => {
@@ -842,6 +959,61 @@ mod tests {
             inactive,
             LedgerOutcome::Definite("rejected:ExecutionNotImplemented".to_owned())
         );
+        client.close();
+        server.shutdown();
+    }
+
+    #[test]
+    fn handoff_query_returns_validated_request_over_pipe() {
+        let name = pipe_name("handoff");
+        let provider: HandoffProvider = Arc::new(|| {
+            let mut processor = zonkey_service::DiagnosticDecisionProcessor::default();
+            zonkey_service::transport::feed_token(&mut processor, "resume", 1);
+            let handoff = processor
+                .current_restore_handoff()
+                .ok_or(HandoffRequestWireError("NoCurrentPlan".to_owned()))?;
+            zonkey_service::transport::build_host_request(&processor, &handoff)
+                .map_err(|error| HandoffRequestWireError(format!("{error:?}")))
+        });
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            composition_gate_handler(),
+            Some(provider),
+        )
+        .expect("server");
+        let mut client = connect(&server);
+        let payload = client
+            .handoff_query(Duration::from_secs(5))
+            .expect("handoff query");
+        assert!(
+            payload.starts_with("handoff:handoff-1|"),
+            "payload={payload}"
+        );
+        // Telex renders "resume" as "réume" (5 scalar units); the handoff
+        // carries the rendered token and the dictionary replacement.
+        assert!(payload.contains("|réume|resume|5|6|1"), "payload={payload}");
+        client.close();
+        server.shutdown();
+    }
+
+    #[test]
+    fn handoff_query_reports_rejection_reason_over_pipe() {
+        let name = pipe_name("handoff-reject");
+        let provider: HandoffProvider =
+            Arc::new(|| Err(HandoffRequestWireError("NoCurrentPlan".to_owned())));
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            composition_gate_handler(),
+            Some(provider),
+        )
+        .expect("server");
+        let mut client = connect(&server);
+        let payload = client
+            .handoff_query(Duration::from_secs(5))
+            .expect("query answers");
+        assert_eq!(payload, "handoff-rejected:NoCurrentPlan");
         client.close();
         server.shutdown();
     }

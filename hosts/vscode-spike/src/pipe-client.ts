@@ -153,6 +153,27 @@ export class NamedPipeClient {
     return payload.slice("RESULT|".length);
   }
 
+  /** Sends one read-only HANDOFF query; returns the result payload text. */
+  async handoffQuery(timeoutMs: number): Promise<string> {
+    if (this.closed) {
+      throw { kind: "ConnectionLost" } as PipeClientError;
+    }
+    this.socket.write(encodeFrame(`HANDOFF|${this.session}`));
+    const payload = await this.nextFrame(timeoutMs);
+    if (payload.startsWith("ERROR|")) {
+      const reason = payload.slice("ERROR|".length);
+      if (reason === "session_mismatch") {
+        throw { kind: "SessionMismatch" } as PipeClientError;
+      }
+      throw { kind: "InvalidPayload", detail: reason } as PipeClientError;
+    }
+    const prefix = "RESULT|DEFINITE|";
+    if (!payload.startsWith(prefix)) {
+      throw { kind: "InvalidPayload", detail: "expected handoff result" } as PipeClientError;
+    }
+    return payload.slice(prefix.length);
+  }
+
   /** Drops the connection immediately; pending awaits reject. */
   destroy(): void {
     this.closed = true;

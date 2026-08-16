@@ -210,19 +210,55 @@ pub fn run_observe() -> Result<(), &'static str> {
     native::run_observe()
 }
 
-/// Runs the M3D-21 query-only host-validation named-pipe endpoint. The
-/// endpoint answers snapshot requests with fail-closed composition decisions
-/// and never executes host edits.
+/// Runs the M3D-21/M3D-22 query-only host-validation named-pipe endpoint.
+/// The endpoint answers snapshot requests with fail-closed composition
+/// decisions and, when a handoff token is supplied, serves read-only
+/// validated handoff requests from the real decision pipeline. It never
+/// executes host edits.
 ///
 /// # Errors
 ///
-/// Returns a sanitized error when the pipe listener cannot start.
+/// Returns a sanitized error when the pipe listener cannot start or the
+/// handoff token is not pure ASCII letters.
 #[cfg(windows)]
-pub fn run_serve_host_validation(pipe_name: &str, max_seconds: Option<u64>) -> Result<(), String> {
-    let server = pipe_transport::spawn_dummy_host_server(
+pub fn run_serve_host_validation(
+    pipe_name: &str,
+    max_seconds: Option<u64>,
+    handoff_token: Option<&str>,
+) -> Result<(), String> {
+    let handoff = match handoff_token {
+        Some(token) => {
+            if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphabetic()) {
+                return Err("handoff token must be non-empty ASCII letters".to_owned());
+            }
+            let processor = std::sync::Arc::new(std::sync::Mutex::new(
+                zonkey_service::DiagnosticDecisionProcessor::default(),
+            ));
+            {
+                let mut guard = processor
+                    .lock()
+                    .map_err(|_| "processor poisoned".to_owned())?;
+                zonkey_service::transport::feed_token(&mut guard, token, 1);
+            }
+            let provider: pipe_transport::HandoffProvider = std::sync::Arc::new(move || {
+                let processor = processor.lock().map_err(|_| {
+                    pipe_transport::HandoffRequestWireError("processor poisoned".to_owned())
+                })?;
+                let handoff = processor.current_restore_handoff().ok_or(
+                    pipe_transport::HandoffRequestWireError("NoCurrentPlan".to_owned()),
+                )?;
+                zonkey_service::transport::build_host_request(&processor, &handoff)
+                    .map_err(|error| pipe_transport::HandoffRequestWireError(format!("{error:?}")))
+            });
+            Some(provider)
+        }
+        None => None,
+    };
+    let server = pipe_transport::spawn_dummy_host_server_with_handoff(
         pipe_name,
         64,
         pipe_transport::composition_gate_handler(),
+        handoff,
     )
     .map_err(|error| format!("pipe listener failed: {error:?}"))?;
     println!(

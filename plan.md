@@ -669,6 +669,25 @@ rather than wrapping or reusing identity.
   mutation path exists in the chain. Security claims stay exactly as ADR
   0025. See ADR 0026.
 
+#### M3D-22 - Real decision handoff into transport request - IN PROGRESS
+
+- `zonkey-service::transport::build_host_request` maps a submitted
+  `RestorePlanHandoff` through revalidation and the internal execution gate
+  into a `HandoffRequest` (rendered token, replacement, scalar units,
+  generation; deterministic `handoff-<generation>` request id). Every other
+  outcome — no current plan, stale handoff, generation mismatch, malformed
+  span, gate failure — rejects before any transport involvement. No
+  host-native range is derived from service scalar lengths; the UTF-16 range
+  stays owned by the host snapshot/adapter.
+- The pipe binding gains a read-only, session-checked `HANDOFF` query with a
+  `HandoffProvider`; `zonkey-cli serve-host-validation --handoff-token resume`
+  drives the real decision pipeline (scripted platform-neutral events, not
+  runtime input) and serves the validated handoff. The VS Code side queries
+  the handoff, merges it with its real snapshot, and sends the request under
+  the handoff's request id: the real E2E stays `rejected:CompositionUnknown`,
+  duplicates replay, and the document is untouched.
+- No mutation, no Applied path, no composition bypass. See ADR 0027.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
