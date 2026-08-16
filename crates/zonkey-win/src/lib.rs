@@ -192,6 +192,8 @@ mod native_edit;
 mod raw;
 #[cfg(windows)]
 mod uia;
+#[cfg(all(test, windows))]
+mod vscode_capability;
 #[cfg(windows)]
 pub use native_edit::{NativeEditEvidence, NativeEditProbeError};
 
