@@ -363,6 +363,22 @@ pub fn ambiguous_loss_outcome() -> LedgerOutcome {
     LedgerOutcome::Ambiguous("connection_lost_before_result".to_owned())
 }
 
+/// Query-only composition gate for the M3D-21 validation endpoint.
+///
+/// Maps the envelope-declared composition state to a definite, replayable
+/// rejection outcome. `Unknown` and any unrecognized value fail closed as
+/// `CompositionUnknown`; `Active` fails closed as `CompositionActive`; even
+/// a proven `Inactive` state is rejected because no host execution path is
+/// approved in this milestone. This function never authorizes mutation.
+#[must_use]
+pub fn composition_gate_outcome(composition: &str) -> LedgerOutcome {
+    match composition {
+        "Inactive" => LedgerOutcome::Definite("rejected:ExecutionNotImplemented".to_owned()),
+        "Active" => LedgerOutcome::Definite("rejected:CompositionActive".to_owned()),
+        _ => LedgerOutcome::Definite("rejected:CompositionUnknown".to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +538,27 @@ mod tests {
         assert_eq!(
             endpoint.classify_request("req-1", "{a:2}"),
             RequestDisposition::Conflict
+        );
+    }
+
+    #[test]
+    fn composition_gate_fails_closed_for_every_state() {
+        assert_eq!(
+            composition_gate_outcome("Unknown"),
+            LedgerOutcome::Definite("rejected:CompositionUnknown".into())
+        );
+        assert_eq!(
+            composition_gate_outcome("Active"),
+            LedgerOutcome::Definite("rejected:CompositionActive".into())
+        );
+        // Even proven inactivity cannot authorize execution in this milestone.
+        assert_eq!(
+            composition_gate_outcome("Inactive"),
+            LedgerOutcome::Definite("rejected:ExecutionNotImplemented".into())
+        );
+        assert_eq!(
+            composition_gate_outcome("anything-else"),
+            LedgerOutcome::Definite("rejected:CompositionUnknown".into())
         );
     }
 

@@ -66,6 +66,16 @@ binding, and ledger semantics) lives in `zonkey-service::transport`; the
 Windows named-pipe binding is deliberately not implemented yet, and real VS
 Code applies remain fail-closed at `CompositionUnknown`.
 
+## Real VS Code transport integration (M3D-21)
+
+`npm run test:transport` (after `cargo build -p zonkey-cli`) spawns a real
+`serve-host-validation` pipe endpoint, launches real VS Code, and asserts the
+full query/reject chain: activation, real snapshot, `HELLO`/`WELCOME`,
+request over the pipe, `DEFINITE|rejected:CompositionUnknown`, duplicate
+replay, disconnect-as-Indeterminate resolved by replay, and an untouched
+document. Note: the extension host connects via the `\\?\pipe\` form and the
+spike pipe serves one connection at a time.
+
 ## Non-claims
 
 - No composition proof, no generic editor support beyond one local text

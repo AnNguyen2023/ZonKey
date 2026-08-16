@@ -24,7 +24,9 @@
     "typecheck": "tsc --noEmit",
     "compile": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.cjs",
     "compile:test": "esbuild integration/real-vscode.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/real-vscode-validation.cjs",
-    "test:real": "npm run compile && npm run compile:test && node scripts/run-real-vscode.mjs"
+    "compile:transport": "esbuild integration/real-vscode-transport.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/transport-validation.cjs",
+    "test:real": "npm run compile && npm run compile:test && node scripts/run-real-vscode.mjs",
+    "test:transport": "npm run compile:transport && node scripts/run-transport-integration.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

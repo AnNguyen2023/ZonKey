@@ -36,6 +36,22 @@ fn main() {
             }
             run_uia_probe(&expected);
         }
+        Some("serve-host-validation") => {
+            let arguments = std::env::args().skip(2).collect::<Vec<_>>();
+            let (pipe_name, max_seconds) = match parse_serve_args(&arguments) {
+                Ok(value) => value,
+                Err(message) => {
+                    eprintln!(
+                        "usage: serve-host-validation --pipe <name> [--max-seconds <n>] ({message})"
+                    );
+                    std::process::exit(2);
+                }
+            };
+            if let Err(error) = zonkey_win::run_serve_host_validation(&pipe_name, max_seconds) {
+                eprintln!("Zonkey host-validation endpoint failed: {error}");
+                std::process::exit(1);
+            }
+        }
         _ => {
             println!(
                 "Zonkey: architecture and audit phase; use `observe-hook`, `observe-raw`, or `diagnose` for the Windows spikes."
@@ -60,6 +76,34 @@ fn parse_probe_args(arguments: &[String]) -> Result<(String, u64), &'static str>
         return Err("delay exceeds 30000ms");
     }
     Ok((expected, delay_ms))
+}
+
+fn parse_serve_args(arguments: &[String]) -> Result<(String, Option<u64>), &'static str> {
+    let mut pipe_name: Option<String> = None;
+    let mut max_seconds: Option<u64> = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--pipe" if index + 1 < arguments.len() => {
+                pipe_name = Some(arguments[index + 1].clone());
+                index += 2;
+            }
+            "--max-seconds" if index + 1 < arguments.len() => {
+                max_seconds = Some(
+                    arguments[index + 1]
+                        .parse::<u64>()
+                        .map_err(|_| "max-seconds must be an integer")?,
+                );
+                index += 2;
+            }
+            _ => return Err("unsupported option"),
+        }
+    }
+    let pipe_name = pipe_name.ok_or("pipe name is required")?;
+    if !pipe_name.starts_with(r"\\.\pipe\") {
+        return Err("pipe name must be a local named pipe path");
+    }
+    Ok((pipe_name, max_seconds))
 }
 
 #[cfg(windows)]

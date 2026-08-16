@@ -76,8 +76,18 @@ impl From<FrameError> for PipeError {
     }
 }
 
-/// Handler invoked exactly once per fresh request id.
-pub type RequestHandler = Arc<dyn Fn(&str, &str) -> LedgerOutcome + Send + Sync>;
+/// Handler invoked exactly once per fresh request id: `(request_id,
+/// composition, canonical)`.
+pub type RequestHandler = Arc<dyn Fn(&str, &str, &str) -> LedgerOutcome + Send + Sync>;
+
+/// Query-only validation handler for the M3D-21 endpoint: fails closed on
+/// composition and never executes anything.
+#[must_use]
+pub fn composition_gate_handler() -> RequestHandler {
+    Arc::new(|_request_id, composition, _canonical| {
+        zonkey_service::transport::composition_gate_outcome(composition)
+    })
+}
 
 /// Wrapper letting a pipe handle cross into the reader thread; the handle is
 /// used from exactly one thread at a time.
@@ -279,7 +289,9 @@ fn serve_connection(
             continue;
         }
         if let Some(request) = payload.strip_prefix("REQ|") {
-            let Some((request_session, request_id, canonical)) = parse_request(request) else {
+            let Some((request_session, request_id, composition, canonical)) =
+                parse_request(request)
+            else {
                 return;
             };
             if endpoint.check_session(request_session).is_err() {
@@ -294,7 +306,7 @@ fn serve_connection(
                     LedgerOutcome::Definite("request_id_reuse".to_owned())
                 }
                 RequestDisposition::Fresh => {
-                    let outcome = handler(request_id, canonical);
+                    let outcome = handler(request_id, composition, canonical);
                     endpoint.record(request_id, canonical, outcome.clone());
                     outcome
                 }
@@ -309,15 +321,16 @@ fn serve_connection(
     }
 }
 
-fn parse_request(payload: &str) -> Option<(&str, &str, &str)> {
-    let mut parts = payload.splitn(3, '|');
+fn parse_request(payload: &str) -> Option<(&str, &str, &str, &str)> {
+    let mut parts = payload.splitn(4, '|');
     let session = parts.next()?;
     let request_id = parts.next()?;
+    let composition = parts.next()?;
     let canonical = parts.next()?;
     if session.is_empty() || request_id.is_empty() || canonical.is_empty() {
         return None;
     }
-    Some((session, request_id, canonical))
+    Some((session, request_id, composition, canonical))
 }
 
 fn outcome_payload(outcome: &LedgerOutcome) -> String {
@@ -429,6 +442,7 @@ impl PipeClient {
     pub fn request(
         &mut self,
         request_id: &str,
+        composition: &str,
         canonical: &str,
         timeout: Duration,
     ) -> Result<LedgerOutcome, PipeError> {
@@ -437,7 +451,14 @@ impl PipeClient {
         }
         let handle = self.handle.ok_or(PipeError::ConnectionLost)?;
         let session = self.session_id.clone();
-        self.request_on(handle, &session, request_id, canonical, timeout)
+        self.request_on(
+            handle,
+            &session,
+            request_id,
+            composition,
+            canonical,
+            timeout,
+        )
     }
 
     fn request_on(
@@ -445,10 +466,16 @@ impl PipeClient {
         handle: HANDLE,
         session: &str,
         request_id: &str,
+        composition: &str,
         canonical: &str,
         timeout: Duration,
     ) -> Result<LedgerOutcome, PipeError> {
-        if write_frame(handle, &format!("REQ|{session}|{request_id}|{canonical}")).is_err() {
+        if write_frame(
+            handle,
+            &format!("REQ|{session}|{request_id}|{composition}|{canonical}"),
+        )
+        .is_err()
+        {
             self.broken = true;
             return Err(PipeError::ConnectionLost);
         }
@@ -569,7 +596,7 @@ mod tests {
     fn counting_handler() -> (RequestHandler, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
-        let handler: RequestHandler = Arc::new(move |_request_id, _canonical| {
+        let handler: RequestHandler = Arc::new(move |_request_id, _composition, _canonical| {
             counter.fetch_add(1, Ordering::Relaxed);
             LedgerOutcome::Definite("applied".to_owned())
         });
@@ -601,7 +628,7 @@ mod tests {
         let server = spawn("roundtrip", handler);
         let mut client = connect(&server);
         let outcome = client
-            .request("req-1", "{canonical}", Duration::from_secs(5))
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
             .expect("roundtrip");
         assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -615,10 +642,10 @@ mod tests {
         let server = spawn("duplicate", handler);
         let mut client = connect(&server);
         let first = client
-            .request("req-1", "{canonical}", Duration::from_secs(5))
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
             .expect("first");
         let second = client
-            .request("req-1", "{canonical}", Duration::from_secs(5))
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
             .expect("replay");
         assert_eq!(first, second);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -649,6 +676,7 @@ mod tests {
                 handle,
                 "bogus-session",
                 "req-1",
+                "Inactive",
                 "{canonical}",
                 Duration::from_secs(5),
             )
@@ -657,7 +685,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         // The correct session still works afterwards on the same connection.
         let outcome = client
-            .request("req-1", "{canonical}", Duration::from_secs(5))
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
             .expect("valid session works");
         assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
         client.close();
@@ -705,7 +733,11 @@ mod tests {
         write_frame(dropped, &format!("HELLO|{TRANSPORT_PROTOCOL_ID}")).expect("hello");
         let welcome = read_frame_with_timeout(dropped, HANDSHAKE_TIMEOUT).expect("welcome");
         let session = welcome.payload.strip_prefix("WELCOME|").expect("session");
-        write_frame(dropped, &format!("REQ|{session}|req-1|{{canonical}}")).expect("send request");
+        write_frame(
+            dropped,
+            &format!("REQ|{session}|req-1|Inactive|{{canonical}}"),
+        )
+        .expect("send request");
         let _ = unsafe { CloseHandle(dropped) };
         // From the dropped client's perspective the outcome is lost.
         let lost = ambiguous_loss_outcome();
@@ -713,7 +745,7 @@ mod tests {
         // A reconnecting client with the same request id replays the result.
         let mut client = connect(&server);
         let replay = client
-            .request("req-1", "{canonical}", Duration::from_secs(5))
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
             .expect("replay resolves ambiguity");
         assert_eq!(replay, LedgerOutcome::Definite("applied".to_owned()));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -730,7 +762,7 @@ mod tests {
         {
             let mut client = PipeClient::connect(&name, Duration::from_secs(5)).expect("client");
             let outcome = client
-                .request("req-1", "{canonical}", Duration::from_secs(5))
+                .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
                 .expect("first run");
             assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
             client.close();
@@ -741,7 +773,7 @@ mod tests {
         {
             let mut client = PipeClient::connect(&name, Duration::from_secs(5)).expect("client");
             let outcome = client
-                .request("req-1", "{canonical}", Duration::from_secs(5))
+                .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
                 .expect("fresh execution after restart");
             assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
             // History was invalidated: the handler ran again.
@@ -755,7 +787,7 @@ mod tests {
     fn bounded_read_timeout_maps_to_indeterminate() {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
-        let handler: RequestHandler = Arc::new(move |_id, _canonical| {
+        let handler: RequestHandler = Arc::new(move |_id, _composition, _canonical| {
             counter.fetch_add(1, Ordering::Relaxed);
             thread::sleep(Duration::from_millis(1200));
             LedgerOutcome::Definite("applied".to_owned())
@@ -763,7 +795,12 @@ mod tests {
         let server = spawn("timeout", handler);
         let mut client = connect(&server);
         let error = client
-            .request("req-1", "{canonical}", Duration::from_millis(300))
+            .request(
+                "req-1",
+                "Inactive",
+                "{canonical}",
+                Duration::from_millis(300),
+            )
             .expect_err("timeout");
         assert_eq!(error, PipeError::Timeout);
         // Caller maps the lost outcome to Indeterminate; no retry happens.
@@ -773,9 +810,38 @@ mod tests {
         ));
         // A later request on the same broken client fails closed.
         let again = client
-            .request("req-2", "{canonical}", Duration::from_secs(5))
+            .request("req-2", "Inactive", "{canonical}", Duration::from_secs(5))
             .expect_err("broken connection");
         assert_eq!(again, PipeError::ConnectionLost);
+        client.close();
+        server.shutdown();
+    }
+
+    #[test]
+    fn composition_gate_endpoint_rejects_unknown_without_execution() {
+        let name = pipe_name("gate");
+        let server = spawn_dummy_host_server(&name, 8, composition_gate_handler()).expect("server");
+        let mut client = connect(&server);
+        let outcome = client
+            .request("req-1", "Unknown", "{canonical}", Duration::from_secs(5))
+            .expect("gated");
+        assert_eq!(
+            outcome,
+            LedgerOutcome::Definite("rejected:CompositionUnknown".to_owned())
+        );
+        // Duplicate replay: same rejection, still no execution path.
+        let replay = client
+            .request("req-1", "Unknown", "{canonical}", Duration::from_secs(5))
+            .expect("replay");
+        assert_eq!(replay, outcome);
+        // A proven-inactive request is still rejected in this milestone.
+        let inactive = client
+            .request("req-2", "Inactive", "{canonical}", Duration::from_secs(5))
+            .expect("gated");
+        assert_eq!(
+            inactive,
+            LedgerOutcome::Definite("rejected:ExecutionNotImplemented".to_owned())
+        );
         client.close();
         server.shutdown();
     }

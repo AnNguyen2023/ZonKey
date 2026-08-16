@@ -210,6 +210,36 @@ pub fn run_observe() -> Result<(), &'static str> {
     native::run_observe()
 }
 
+/// Runs the M3D-21 query-only host-validation named-pipe endpoint. The
+/// endpoint answers snapshot requests with fail-closed composition decisions
+/// and never executes host edits.
+///
+/// # Errors
+///
+/// Returns a sanitized error when the pipe listener cannot start.
+#[cfg(windows)]
+pub fn run_serve_host_validation(pipe_name: &str, max_seconds: Option<u64>) -> Result<(), String> {
+    let server = pipe_transport::spawn_dummy_host_server(
+        pipe_name,
+        64,
+        pipe_transport::composition_gate_handler(),
+    )
+    .map_err(|error| format!("pipe listener failed: {error:?}"))?;
+    println!(
+        "zonkey host-validation endpoint ready pipe={pipe_name} protocol=zonkey.host-transport/1"
+    );
+    if let Some(seconds) = max_seconds {
+        std::thread::sleep(std::time::Duration::from_secs(seconds));
+    } else {
+        let (_release, shutdown) = std::sync::mpsc::channel::<()>();
+        // Blocks until the process is terminated; the pipe server thread
+        // keeps serving connections in the background.
+        let _ = shutdown.recv();
+    }
+    server.shutdown();
+    Ok(())
+}
+
 /// Runs the Windows observe-only Raw Input comparison spike.
 ///
 /// # Errors

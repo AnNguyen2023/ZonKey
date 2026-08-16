@@ -650,6 +650,25 @@ rather than wrapping or reusing identity.
   bounded timeout. No VS Code `Applied`, no composition change, no mutation,
   no auto-restore wiring. See ADR 0025.
 
+#### M3D-21 - Real VS Code transport integration, query/reject only - IN PROGRESS
+
+- End-to-end connection between the real VS Code extension host and the real
+  Windows named-pipe transport: a TypeScript pipe client in the spike
+  speaking the exact M3D-20 wire protocol, a query-only composition gate in
+  `zonkey-service::transport` (Unknown/Active fail closed; even Inactive
+  returns `rejected:ExecutionNotImplemented`), and
+  `zonkey-cli serve-host-validation` exposing the endpoint.
+- The real-VS-Code integration test runs real processes and asserts:
+  activation, snapshot with `composition: Unknown`, the session-bound
+  handshake, the request crossing the pipe, the recorded duplicate replay,
+  same-tick disconnect resolving through replay (never automatic retry), and
+  an untouched document. Measured facts: the ext host needs the
+  `\\?\pipe\` device-path form, and the spike pipe serves one connection at
+  a time.
+- No `TextEditor.edit` is enabled, composition policy is unchanged, and no
+  mutation path exists in the chain. Security claims stay exactly as ADR
+  0025. See ADR 0026.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
