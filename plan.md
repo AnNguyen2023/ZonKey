@@ -748,6 +748,25 @@ rather than wrapping or reusing identity.
   precondition is defined, not invented. No mutation is implemented. See
   ADR 0030.
 
+#### M3D-26 - Controlled mutation contract harness - IN PROGRESS
+
+- Test-only implementation of the ADR 0030 contract on a deterministic
+  dummy cooperating host (`#[cfg(test)]` in `zonkey-service`): fixed-order
+  eligibility validator, one atomic host-owned compare-and-replace with the
+  in-transaction re-read as the only authorization window, post-commit
+  verification (exactly `revision + 1` and the exact intended text), the
+  reused bounded idempotency ledger, and the Indeterminate workflow that
+  blocks the logical target until a reconciliation readback plus explicit
+  owner acknowledgement.
+- Synthetic composition evidence exists only in the harness: `Inactive`
+  requires `CAP_COMPOSITION_PROOF`, and an unproven Inactive still fails
+  closed as `CompositionUnknown`. Twenty deterministic tests cover the
+  happy path, every major rejection, duplicate/replay semantics, lost and
+  ambiguous outcomes, all three reconciliation verdicts, the blocked-target
+  lifecycle, revision overflow, and no-partial-mutation. The real VS Code
+  binding is untouched and still returns `CompositionUnknown`; no mutation
+  path exists in production. See ADR 0031.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

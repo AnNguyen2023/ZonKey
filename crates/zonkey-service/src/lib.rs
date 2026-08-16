@@ -5,6 +5,16 @@
 
 pub mod transport;
 
+#[cfg(test)]
+mod mutation_harness;
+#[cfg(test)]
+#[allow(
+    clippy::semicolon_if_nothing_returned,
+    clippy::type_complexity,
+    clippy::too_many_lines
+)]
+mod mutation_harness_tests;
+
 use std::collections::VecDeque;
 
 use zonkey_detect::{BuiltInDictionaries, Classifier, DetectionRequest, LexicalEvidence};
