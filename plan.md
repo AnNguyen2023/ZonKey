@@ -712,6 +712,20 @@ rather than wrapping or reusing identity.
   real VS Code, `M3D23_LIVE_SMOKE_OK` exit 0, no SendInput or scripted feed
   as evidence, document unchanged. See ADR 0028.
 
+#### M3D-24 - Production boundary / remaining blockers review - DONE
+
+- Design-only classification of remaining blockers before any real `Applied`
+  path, based on the validated live end-to-end chain. Two blockers are
+  MUST_SOLVE_BEFORE_APPLIED: composition evidence (ADR 0023 conditions) and
+  the crash/Indeterminate recovery policy; mutation eligibility itself must
+  be designed and approved first. Pipe ACL, ledger bounds, host/session
+  identity, transport lifecycle, packaging, and diagnostics/privacy are
+  HARDEN_BEFORE_RELEASE with fail-closed defaults today.
+- Verdict: `READY_FOR_CONTROLLED_MUTATION_DESIGN` — the design may proceed
+  while remaining unimplementable until the composition source exists and
+  the recovery policy is approved. No mutation is designed or implemented in
+  M3D-24. See ADR 0029.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
