@@ -629,6 +629,27 @@ rather than wrapping or reusing identity.
   fail-closed at `CompositionUnknown`; no composition, mutation, or
   auto-restore policy changed. See ADR 0024.
 
+#### M3D-20 - Windows named-pipe transport spike - IN PROGRESS
+
+- Narrow Windows 11 x64 named-pipe binding of the M3D-19 transport contract,
+  isolated in `zonkey-win::pipe_transport`: duplex byte-mode pipe, bounded
+  64 KiB frames, `HELLO`/`WELCOME` handshake binding one server-issued
+  session id, protocol/session mismatch rejection before execution,
+  malformed/oversized frames failing closed by disconnection, a bounded
+  client read timeout via `CancelSynchronousIo`, and clean listener/session
+  teardown. Duplicate request ids replay recorded outcomes over the pipe;
+  a disconnect after a request is `Indeterminate` and is resolved by replay,
+  never by automatic retry.
+- Security is stated exactly: default process DACL (creating user, admins,
+  local system), no explicit per-user ACL, no impersonation, no trust in
+  PID/HWND/pipe name; the session id is a correlation token, not
+  cryptographic authentication, and no stronger claim is made.
+- Ten real-pipe tests cover hello, roundtrip with a dummy host, duplicate
+  replay, protocol and session mismatch, malformed and oversized frames,
+  disconnect ambiguity plus replay, server restart invalidation, and the
+  bounded timeout. No VS Code `Applied`, no composition change, no mutation,
+  no auto-restore wiring. See ADR 0025.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
