@@ -857,6 +857,58 @@ rather than wrapping or reusing identity.
 - Verdict: **DURABLE_RECOVERY_MODEL_READY** — implementation is a separate
   owner-approved milestone. See ADR 0035.
 
+#### M3D-31 - Durable recovery persistence - DONE
+
+- Implements the approved ADR 0035 model and closes both of its residuals.
+  `zonkey_service::recovery_codec` provides the bounded, versioned
+  state-file format (magic/version, 128-bit salt, ≤ 128 entries, ≤ 256 KiB,
+  CRC32) with clean-room SHA-256 and CRC-32; records are blocked targets or
+  pending preflight intents persisting only URI, range, salted hashes of
+  expected/replacement, verdict state, generation, and request id — never
+  plaintext text.
+- Durable preflight (residual 1 closed): `RecoveryDescriptor` (request id,
+  URI, host-owned UTF-16 range carried verbatim — never derived from
+  service scalar lengths, expected/replacement, generation) rides the new
+  `REQX` request family (same framing, same fail-closed handler, no
+  execution path). A PendingRecovery record is persisted before a fresh
+  request may execute (preflight failure ⇒ `rejected:RecoveryPreflightFailed`,
+  handler never runs); blocked targets answer `rejected:TargetBlocked`
+  across restarts until reconcile + owner ack; the intent resolves only
+  after the delivery attempt — delivered definitive rejection clears it,
+  delivered Applied/ambiguous promotes it, failed delivery (disconnect)
+  promotes it; a crash at any point reloads pending or blocked, never
+  silently clean.
+- Recovery-backed eviction (residual 2 closed): the ledger records REQX
+  outcomes via `record_with_recovery`; an Ambiguous entry with an existing
+  durable record is evictable so the ledger stays bounded, unbacked
+  ambiguous entries remain pinned (all-unbacked saturation refuses to
+  record), and the durable state is the source of truth for anything
+  evicted.
+- `RecoveryText` splits fresh plaintext blocks from hash-restored targets;
+  restored entries load blocked with an empty session and rebind on the
+  first valid operator action; reconciliation compares salted hashes and
+  fails closed without the salt; the registry never evicts unresolved
+  blocks (`RegistryFull` when full).
+- `zonkey-win::recovery_store` write-through-before-commit durable store at
+  `%LOCALAPPDATA%\ZonKey\recovery-state.bin`: ACL'd temp → flush →
+  `MoveFileExW(WRITE_THROUGH|REPLACE_EXISTING)`; corrupt/truncated/
+  oversized/unknown-version state poisons the store with typed errors and
+  is never read as empty; no weaker-ACL fallback. Endpoints: ledger 256,
+  durable registry 128.
+- Verified by codec/transport/store unit tests (NIST vectors, blocked and
+  pending roundtrips, restart preservation, per-verdict persistence,
+  corruption poisoning, no plaintext on disk, deterministic in-salt
+  encoding, fresh salts, full-unresolved rejection, crash-temp simulation,
+  DACL inspection, pending-restart-as-blocked, promote/clear lifecycle,
+  pending capacity bound) plus pipe E2E over the durable store including
+  the four deterministic crash points (before preflight, after preflight
+  before send, after send before result, lost response) and the
+  restart-requires-reconcile-ack invariant; 230 workspace tests, repeated
+  stability loops, npm 31/31 + typecheck. Remaining stated residual: plain
+  descriptor-free `REQ` traffic stays outside the preflight protocol by
+  design (it carries no logical-target metadata and cannot mutate; every
+  handler outcome today is a deterministic rejection). See ADR 0036.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

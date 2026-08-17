@@ -289,14 +289,20 @@ pub(crate) fn verify_peer_is_current_user(pipe_handle: HANDLE) -> Result<(), Pip
     inspected
 }
 
-/// Unpredictable lowercase hex nonce from the system-preferred RNG
-/// (`BCryptGenRandom`), 2 characters per input byte.
-pub(crate) fn random_nonce_hex(byte_length: usize) -> Result<String, PipeSecurityError> {
+/// Random bytes from the system-preferred RNG (`BCryptGenRandom`).
+pub(crate) fn random_bytes(byte_length: usize) -> Result<Vec<u8>, PipeSecurityError> {
     let mut bytes = vec![0u8; byte_length];
     let status = unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
     if status.is_err() {
         return Err(PipeSecurityError::RandomUnavailable);
     }
+    Ok(bytes)
+}
+
+/// Unpredictable lowercase hex nonce from the system-preferred RNG
+/// (`BCryptGenRandom`), 2 characters per input byte.
+pub(crate) fn random_nonce_hex(byte_length: usize) -> Result<String, PipeSecurityError> {
+    let bytes = random_bytes(byte_length)?;
     let mut text = String::with_capacity(byte_length * 2);
     for byte in &bytes {
         let _ = write!(text, "{byte:02x}");

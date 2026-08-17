@@ -195,6 +195,8 @@ pub mod pipe_transport;
 #[cfg(windows)]
 mod raw;
 #[cfg(windows)]
+pub mod recovery_store;
+#[cfg(windows)]
 mod uia;
 #[cfg(all(test, windows))]
 mod vscode_capability;
@@ -258,12 +260,11 @@ pub fn run_serve_host_validation(
     };
     let server = pipe_transport::spawn_dummy_host_server_with_handoff(
         pipe_name,
-        64,
+        256,
         pipe_transport::composition_gate_handler(),
         handoff,
         Some(std::sync::Arc::new(std::sync::Mutex::new(
-            zonkey_service::transport::RecoveryRegistry::new(64)
-                .map_err(|_| "recovery capacity".to_owned())?,
+            recovery_store::DurableRecoveryStore::open_default(),
         ))),
     )
     .map_err(|error| format!("pipe listener failed: {error:?}"))?;
@@ -302,12 +303,11 @@ pub fn run_handoff_live(pipe_name: &str) -> Result<(), String> {
     });
     let server = pipe_transport::spawn_dummy_host_server_with_handoff(
         pipe_name,
-        64,
+        256,
         pipe_transport::composition_gate_handler(),
         Some(provider),
         Some(std::sync::Arc::new(std::sync::Mutex::new(
-            zonkey_service::transport::RecoveryRegistry::new(64)
-                .map_err(|_| "recovery capacity".to_owned())?,
+            recovery_store::DurableRecoveryStore::open_default(),
         ))),
     )
     .map_err(|error| format!("pipe listener failed: {error:?}"))?;

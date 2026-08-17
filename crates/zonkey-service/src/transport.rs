@@ -16,6 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::EventProcessor as _;
+use crate::recovery_codec;
 
 /// Protocol identity required at hello time on both endpoints.
 pub const TRANSPORT_PROTOCOL_ID: &str = "zonkey.host-transport/1";
@@ -133,22 +134,36 @@ pub struct LedgerCapacityError;
 pub enum RecordOutcome {
     /// Recorded; the ledger was below capacity.
     Inserted,
-    /// Recorded; the oldest inserted id was evicted deterministically.
+    /// Recorded; the oldest inserted evictable id was evicted
+    /// deterministically.
     Evicted { evicted: String },
     /// The id already existed; nothing changed.
     AlreadyPresent,
+    /// The ledger is at capacity and every retained entry is an unbacked
+    /// `Ambiguous` outcome, which is pinned and never evicted (ADR 0035);
+    /// nothing was recorded and the caller must surface the lost replay
+    /// protection.
+    RejectedLedgerFull,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LedgerEntry {
     canonical: String,
     outcome: LedgerOutcome,
+    /// True when a durable recovery record backs this request (M3D-31
+    /// preflight): its Ambiguous outcome may be evicted because the durable
+    /// recovery state remains the source of truth.
+    recovery_backed: bool,
 }
 
-/// A bounded request ledger with deterministic FIFO eviction.
+/// A bounded request ledger with deterministic eviction.
 ///
-/// Eviction removes the oldest *inserted* entry; lookups never refresh
-/// order. All outcome kinds, including `Ambiguous`, are retained and replayed
+/// Unbacked `Ambiguous` entries are pinned: eviction removes only definite
+/// entries or `Ambiguous` entries marked recovery-backed (whose durable
+/// recovery record persists independently). When every retained entry is an
+/// unbacked ambiguous outcome the ledger refuses to record (fail closed)
+/// rather than forget a result whose loss is unresolved (ADR 0035). Lookups
+/// never refresh order; all outcome kinds are retained and replayed
 /// verbatim.
 #[derive(Debug)]
 pub struct BoundedRequestLedger {
@@ -204,22 +219,58 @@ impl BoundedRequestLedger {
         }
     }
 
-    /// Records one outcome, evicting the oldest inserted entry when full.
+    /// Records one outcome, evicting the oldest inserted evictable entry
+    /// when full: definite entries, and `Ambiguous` entries whose request is
+    /// recovery-backed. Unbacked ambiguous entries are pinned; a ledger that
+    /// holds only unbacked ambiguous entries at capacity refuses to record
+    /// and returns [`RecordOutcome::RejectedLedgerFull`].
     pub fn record(
         &mut self,
         request_id: &str,
         canonical: &str,
         outcome: LedgerOutcome,
     ) -> RecordOutcome {
+        self.record_inner(request_id, canonical, outcome, false)
+    }
+
+    /// Records one outcome for a request whose durable recovery record
+    /// already exists (M3D-31 preflight): its Ambiguous outcome may later be
+    /// evicted because the durable recovery state remains the source of
+    /// truth.
+    pub fn record_with_recovery(
+        &mut self,
+        request_id: &str,
+        canonical: &str,
+        outcome: LedgerOutcome,
+    ) -> RecordOutcome {
+        self.record_inner(request_id, canonical, outcome, true)
+    }
+
+    fn record_inner(
+        &mut self,
+        request_id: &str,
+        canonical: &str,
+        outcome: LedgerOutcome,
+        recovery_backed: bool,
+    ) -> RecordOutcome {
         if self.entries.contains_key(request_id) {
             return RecordOutcome::AlreadyPresent;
         }
-        let evicted = if self.order.len() == self.capacity {
-            self.order.pop_front().inspect(|oldest| {
-                self.entries.remove(oldest);
-            })
-        } else {
+        let evicted = if self.order.len() < self.capacity {
             None
+        } else {
+            let evictable = self.order.iter().position(|id| match self.entries.get(id) {
+                Some(entry) => {
+                    !matches!(entry.outcome, LedgerOutcome::Ambiguous(_)) || entry.recovery_backed
+                }
+                None => true,
+            });
+            match evictable {
+                Some(index) => self.order.remove(index).inspect(|oldest| {
+                    self.entries.remove(oldest);
+                }),
+                None => return RecordOutcome::RejectedLedgerFull,
+            }
         };
         self.order.push_back(request_id.to_owned());
         self.entries.insert(
@@ -227,6 +278,7 @@ impl BoundedRequestLedger {
             LedgerEntry {
                 canonical: canonical.to_owned(),
                 outcome,
+                recovery_backed,
             },
         );
         match evicted {
@@ -350,11 +402,46 @@ impl HostTransportEndpoint {
         self.ledger.record(request_id, canonical, outcome)
     }
 
+    /// Records one request outcome whose durable recovery record already
+    /// exists (M3D-31 preflight): the entry may be evicted even when
+    /// ambiguous, because the durable recovery state is the source of truth.
+    pub fn record_with_recovery(
+        &mut self,
+        request_id: &str,
+        canonical: &str,
+        outcome: LedgerOutcome,
+    ) -> RecordOutcome {
+        self.ledger
+            .record_with_recovery(request_id, canonical, outcome)
+    }
+
     /// Read-only view of the bounded ledger.
     #[must_use]
     pub fn ledger(&self) -> &BoundedRequestLedger {
         &self.ledger
     }
+}
+
+/// Minimal platform-neutral recovery descriptor carried with any
+/// future mutation-capable host request (M3D-31 / ADR 0036). The UTF-16
+/// range is host-owned snapshot data carried verbatim — it is never derived
+/// from service scalar token lengths. Persistence hashes the expected and
+/// replacement values with the state-file salt; plaintext never reaches
+/// disk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveryDescriptor {
+    /// Request id of the carrying request.
+    pub request_id: String,
+    /// Logical target identity: document URI.
+    pub uri: String,
+    /// Host-owned UTF-16 range of the compare-and-replace target.
+    pub range: (usize, usize),
+    /// Expected rendered value; hash input on persistence.
+    pub expected: String,
+    /// Intended replacement value; hash input on persistence.
+    pub replacement: String,
+    /// Service-local plan generation at capture time.
+    pub generation: u64,
 }
 
 /// The canonical outcome for a request whose result was lost to a timeout or
@@ -512,21 +599,62 @@ pub enum RecoveryVerdict {
     ConflictHumanReview,
 }
 
+/// Token material of a blocked target. Fresh operator blocks carry the
+/// plaintext needed for exact comparisons and operator output; targets
+/// restored from durable state carry only the salted hash (ADR 0035 never
+/// persists plaintext document text).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveryText {
+    /// Plaintext token (in-memory, same-user surface only).
+    Plain(String),
+    /// Salted SHA-256 of the token as persisted by [`crate::recovery_codec`].
+    Hashed([u8; 32]),
+}
+
+impl RecoveryText {
+    /// Exact-match test against live readback text. A hashed entry needs
+    /// the file salt it was restored with; without it the match fails
+    /// closed.
+    #[must_use]
+    pub fn matches(&self, salt: Option<&[u8; recovery_codec::SALT_BYTES]>, live: &str) -> bool {
+        match self {
+            RecoveryText::Plain(text) => text == live,
+            RecoveryText::Hashed(hash) => match salt {
+                Some(salt) => &recovery_codec::salted_hash(salt, live) == hash,
+                None => false,
+            },
+        }
+    }
+
+    /// Operator-facing display form; hashed entries never reveal text.
+    #[must_use]
+    pub fn display(&self) -> String {
+        match self {
+            RecoveryText::Plain(text) => text.clone(),
+            RecoveryText::Hashed(_) => "<hashed>".to_owned(),
+        }
+    }
+}
+
 /// One blocked logical target awaiting reconciliation and acknowledgement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockedTarget {
-    /// Session that recorded the Indeterminate outcome.
+    /// Session that recorded the Indeterminate outcome; empty for targets
+    /// restored from durable state until the first operator action rebinds
+    /// them to the current session.
     pub session_id: String,
     /// Document URI of the logical target.
     pub uri: String,
     /// Original rendered token at the time of the outcome.
-    pub expected: String,
+    pub expected: RecoveryText,
     /// Intended replacement of the lost outcome.
-    pub replacement: String,
+    pub replacement: RecoveryText,
     /// UTF-16 range of the readback comparison.
     pub range: (usize, usize),
     /// Reconciliation state: none yet, or a verdict plus acknowledgement.
     pub state: Option<(RecoveryVerdict, bool)>,
+    /// Service-local plan generation at block time; zero when unavailable.
+    pub generation: u64,
 }
 
 /// Fail-closed registry errors for the recovery workflow.
@@ -538,20 +666,25 @@ pub enum RecoveryError {
     SessionMismatch,
     /// Acknowledgement before any reconciliation readback.
     AckBeforeReconcile,
+    /// The registry is at capacity with entries that may not be evicted
+    /// (unresolved blocks); new blocks are rejected until the operator
+    /// reconciles and acknowledges existing targets (ADR 0035).
+    RegistryFull,
 }
 
-/// Bounded, in-session registry implementing the ADR 0030 recovery
-/// lifecycle: an Indeterminate outcome blocks a logical target; only an
-/// explicit reconciliation readback followed by an explicit operator
-/// acknowledgement unblocks it. State is deliberately **not persisted**: a
-/// crash or restart empties the registry, which must be re-established from
-/// operator records; durable recovery is a release-gated decision (ADR
-/// 0032). The oldest entry is evicted when the bound is reached.
-#[derive(Debug)]
+/// Bounded registry implementing the ADR 0030 recovery lifecycle: an
+/// Indeterminate outcome blocks a logical target; only an explicit
+/// reconciliation readback followed by an explicit operator acknowledgement
+/// unblocks it. Unresolved blocks are never evicted — a full registry
+/// rejects new blocks instead. Targets restored from durable state
+/// (ADR 0035) carry hashed token material and an empty session id; the
+/// first valid operator action rebinds them to the current session.
+#[derive(Clone, Debug)]
 pub struct RecoveryRegistry {
     capacity: usize,
     order: VecDeque<String>,
     entries: HashMap<String, BlockedTarget>,
+    salt: Option<[u8; recovery_codec::SALT_BYTES]>,
 }
 
 impl RecoveryRegistry {
@@ -568,15 +701,103 @@ impl RecoveryRegistry {
             capacity,
             order: VecDeque::new(),
             entries: HashMap::new(),
+            salt: None,
         })
+    }
+
+    /// Rebuilds a registry from durable records (M3D-31): restored targets
+    /// load as blocked with hashed token material, an empty session id, and
+    /// their recorded verdict.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerCapacityError`] when `capacity` is zero or smaller
+    /// than the record count.
+    pub fn restore(
+        capacity: usize,
+        salt: [u8; recovery_codec::SALT_BYTES],
+        records: Vec<recovery_codec::PersistedTarget>,
+    ) -> Result<Self, LedgerCapacityError> {
+        if capacity == 0 || records.len() > capacity {
+            return Err(LedgerCapacityError);
+        }
+        let mut registry = Self::new(capacity)?;
+        registry.salt = Some(salt);
+        for record in records {
+            let verdict = match record.kind {
+                recovery_codec::PersistedKind::Blocked { verdict } => verdict,
+                // A pending preflight intent that survived a restart was
+                // never definitively resolved: it reloads as a blocked
+                // target (recovery-required), never as clean state.
+                recovery_codec::PersistedKind::Pending => None,
+            };
+            let key = Self::key(&record.uri, &hex(&record.expected_hash));
+            registry.order.push_back(key.clone());
+            registry.entries.insert(
+                key,
+                BlockedTarget {
+                    session_id: String::new(),
+                    uri: record.uri,
+                    expected: RecoveryText::Hashed(record.expected_hash),
+                    replacement: RecoveryText::Hashed(record.replacement_hash),
+                    range: record.range,
+                    state: verdict.map(|verdict| (verdict, false)),
+                    generation: record.generation,
+                },
+            );
+        }
+        Ok(registry)
+    }
+
+    /// The salt restored from durable state, if any; hashed entries fail
+    /// closed without it.
+    #[must_use]
+    pub fn salt(&self) -> Option<[u8; recovery_codec::SALT_BYTES]> {
+        self.salt
+    }
+
+    /// Configured maximum number of retained targets.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// True when the logical target (URI plus expected token) is blocked;
+    /// operator-supplied plaintext resolves hashed restored entries via the
+    /// file salt.
+    #[must_use]
+    pub fn is_blocked(&self, uri: &str, expected: &str) -> bool {
+        self.entries.contains_key(&self.resolve_key(uri, expected))
     }
 
     fn key(uri: &str, expected: &str) -> String {
         format!("{uri}\u{0}{expected}")
     }
 
+    /// Resolves the registry key for operator-supplied plaintext: the
+    /// plaintext key when present, otherwise the salted-hash key for a
+    /// restored target when the salt is known.
+    fn resolve_key(&self, uri: &str, expected: &str) -> String {
+        let plain = Self::key(uri, expected);
+        if self.entries.contains_key(&plain) {
+            return plain;
+        }
+        match self.salt {
+            Some(salt) => Self::key(uri, &hex(&recovery_codec::salted_hash(&salt, expected))),
+            None => plain,
+        }
+    }
+
     /// Records a blocked target; re-blocking the same target refreshes its
-    /// state. Returns the evicted target URI when the bound was reached.
+    /// state. Unresolved blocks are never evicted: when the capacity is
+    /// reached the new block is rejected fail-closed (the caller surfaces
+    /// [`RecoveryError::RegistryFull`] to the operator).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecoveryError::RegistryFull`] when the registry is full;
+    /// acknowledged entries are removed, so a full registry always consists
+    /// of unresolved targets.
     pub fn block(
         &mut self,
         session_id: &str,
@@ -584,15 +805,10 @@ impl RecoveryRegistry {
         expected: &str,
         replacement: &str,
         range: (usize, usize),
-    ) -> Option<String> {
-        let key = Self::key(uri, expected);
-        let mut evicted: Option<String> = None;
-        if !self.entries.contains_key(&key)
-            && self.order.len() == self.capacity
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.entries.remove(&oldest);
-            evicted = Some(oldest.split('\u{0}').next().unwrap_or_default().to_owned());
+    ) -> Result<Option<String>, RecoveryError> {
+        let key = self.resolve_key(uri, expected);
+        if !self.entries.contains_key(&key) && self.order.len() == self.capacity {
+            return Err(RecoveryError::RegistryFull);
         }
         if !self.entries.contains_key(&key) {
             self.order.push_back(key.clone());
@@ -602,13 +818,14 @@ impl RecoveryRegistry {
             BlockedTarget {
                 session_id: session_id.to_owned(),
                 uri: uri.to_owned(),
-                expected: expected.to_owned(),
-                replacement: replacement.to_owned(),
+                expected: RecoveryText::Plain(expected.to_owned()),
+                replacement: RecoveryText::Plain(replacement.to_owned()),
                 range,
                 state: None,
+                generation: 0,
             },
         );
-        evicted
+        Ok(None)
     }
 
     /// Lists blocked targets in insertion order (sanitized view).
@@ -622,7 +839,10 @@ impl RecoveryRegistry {
 
     /// Runs the reconciliation readback against live range text supplied by
     /// the host snapshot; idempotent (a second call returns the recorded
-    /// verdict without re-evaluating).
+    /// verdict without re-evaluating). A target restored from durable state
+    /// has an empty session id; the first valid operator action rebinds it
+    /// to the calling session. Hashed (restored) entries compare by salted
+    /// hash and fail closed without the file salt.
     ///
     /// # Errors
     ///
@@ -635,20 +855,23 @@ impl RecoveryRegistry {
         expected: &str,
         live_range_text: &str,
     ) -> Result<RecoveryVerdict, RecoveryError> {
-        let key = Self::key(uri, expected);
+        let key = self.resolve_key(uri, expected);
+        let salt = self.salt;
         let target = self
             .entries
             .get_mut(&key)
             .ok_or(RecoveryError::UnknownTarget)?;
-        if target.session_id != session_id {
+        if target.session_id.is_empty() {
+            session_id.clone_into(&mut target.session_id);
+        } else if target.session_id != session_id {
             return Err(RecoveryError::SessionMismatch);
         }
         if let Some((verdict, _)) = target.state {
             return Ok(verdict);
         }
-        let verdict = if live_range_text == target.replacement {
+        let verdict = if target.replacement.matches(salt.as_ref(), live_range_text) {
             RecoveryVerdict::AppliedAcknowledged
-        } else if live_range_text == target.expected {
+        } else if target.expected.matches(salt.as_ref(), live_range_text) {
             RecoveryVerdict::NotApplied
         } else {
             RecoveryVerdict::ConflictHumanReview
@@ -658,7 +881,8 @@ impl RecoveryRegistry {
     }
 
     /// Explicit operator acknowledgement; only valid after reconciliation.
-    /// A successful acknowledgement removes the block.
+    /// A successful acknowledgement removes the block. A target restored
+    /// from durable state rebinds to the calling session first.
     ///
     /// # Errors
     ///
@@ -670,12 +894,14 @@ impl RecoveryRegistry {
         uri: &str,
         expected: &str,
     ) -> Result<(), RecoveryError> {
-        let key = Self::key(uri, expected);
+        let key = self.resolve_key(uri, expected);
         let target = self
             .entries
             .get_mut(&key)
             .ok_or(RecoveryError::UnknownTarget)?;
-        if target.session_id != session_id {
+        if target.session_id.is_empty() {
+            session_id.clone_into(&mut target.session_id);
+        } else if target.session_id != session_id {
             return Err(RecoveryError::SessionMismatch);
         }
         let Some((_verdict, _)) = target.state else {
@@ -685,6 +911,16 @@ impl RecoveryRegistry {
         self.order.retain(|entry| entry != &key);
         Ok(())
     }
+}
+
+/// Lowercase hex encoding used for hash-keyed restored targets.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 /// Shared live decision state for the M3D-23 live observer wiring.
@@ -1305,7 +1541,10 @@ mod tests {
     fn recovery_registry_full_lifecycle() {
         let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
         assert!(registry.list().is_empty());
-        registry.block("sess-1", "file:///a", "resume", "restored", (0, 6));
+        assert_eq!(
+            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6)),
+            Ok(None)
+        );
         assert_eq!(registry.list().len(), 1);
         // Ack before reconciliation is rejected.
         assert_eq!(
@@ -1336,7 +1575,10 @@ mod tests {
     #[test]
     fn recovery_registry_not_applied_and_conflict_verdicts() {
         let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
-        registry.block("sess-1", "file:///a", "resume", "restored", (0, 6));
+        assert_eq!(
+            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6)),
+            Ok(None)
+        );
         assert_eq!(
             registry.reconcile("sess-1", "file:///a", "resume", "resume"),
             Ok(RecoveryVerdict::NotApplied)
@@ -1345,7 +1587,10 @@ mod tests {
             registry.acknowledge("sess-1", "file:///a", "resume"),
             Ok(())
         );
-        registry.block("sess-1", "file:///b", "resume", "restored", (0, 6));
+        assert_eq!(
+            registry.block("sess-1", "file:///b", "resume", "restored", (0, 6)),
+            Ok(None)
+        );
         assert_eq!(
             registry.reconcile("sess-1", "file:///b", "resume", "mangled!"),
             Ok(RecoveryVerdict::ConflictHumanReview)
@@ -1362,7 +1607,10 @@ mod tests {
     #[test]
     fn recovery_registry_rejects_wrong_session_and_unknown_targets() {
         let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
-        registry.block("sess-1", "file:///a", "resume", "restored", (0, 6));
+        assert_eq!(
+            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6)),
+            Ok(None)
+        );
         assert_eq!(
             registry.reconcile("sess-2", "file:///a", "resume", "restored"),
             Err(RecoveryError::SessionMismatch)
@@ -1378,21 +1626,190 @@ mod tests {
     }
 
     #[test]
-    fn recovery_registry_is_bounded_and_restart_empties_state() {
-        let mut registry = RecoveryRegistry::new(1).expect("non-zero capacity");
+    fn recovery_registry_full_of_unresolved_rejects_new_blocks() {
+        let mut registry = RecoveryRegistry::new(2).expect("non-zero capacity");
         assert_eq!(
             registry.block("sess-1", "file:///a", "t1", "r1", (0, 2)),
-            None
+            Ok(None)
         );
-        let evicted = registry.block("sess-1", "file:///b", "t2", "r2", (0, 2));
-        assert_eq!(evicted.as_deref(), Some("file:///a"));
-        assert_eq!(registry.list().len(), 1);
-        // A restart is modeled by a fresh registry: state is not durable.
-        let mut restarted = RecoveryRegistry::new(4).expect("non-zero capacity");
-        assert!(restarted.list().is_empty());
         assert_eq!(
-            restarted.acknowledge("sess-1", "file:///b", "t2"),
-            Err(RecoveryError::UnknownTarget)
+            registry.block("sess-1", "file:///b", "t2", "r2", (0, 2)),
+            Ok(None)
         );
+        // Unresolved blocks are never evicted: a full registry rejects.
+        assert_eq!(
+            registry.block("sess-1", "file:///c", "t3", "r3", (0, 2)),
+            Err(RecoveryError::RegistryFull)
+        );
+        assert_eq!(registry.list().len(), 2);
+        // Resolving and acknowledging one target frees capacity.
+        assert_eq!(
+            registry.reconcile("sess-1", "file:///a", "t1", "r1"),
+            Ok(RecoveryVerdict::AppliedAcknowledged)
+        );
+        assert_eq!(registry.acknowledge("sess-1", "file:///a", "t1"), Ok(()));
+        assert_eq!(
+            registry.block("sess-1", "file:///c", "t3", "r3", (0, 2)),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn restored_targets_rebind_reconcile_by_hash_and_ack() {
+        let salt = [0xABu8; recovery_codec::SALT_BYTES];
+        let record = |verdict| recovery_codec::PersistedTarget {
+            uri: "file:///a".to_owned(),
+            range: (0, 6),
+            expected_hash: recovery_codec::salted_hash(&salt, "resume"),
+            replacement_hash: recovery_codec::salted_hash(&salt, "restored"),
+            kind: recovery_codec::PersistedKind::Blocked { verdict },
+            generation: 1,
+            request_id: "operator".to_owned(),
+        };
+        for (verdict, live, expected) in [
+            (None, "restored", RecoveryVerdict::AppliedAcknowledged),
+            (None, "resume", RecoveryVerdict::NotApplied),
+            (None, "mangled!", RecoveryVerdict::ConflictHumanReview),
+        ] {
+            let mut registry =
+                RecoveryRegistry::restore(4, salt, vec![record(verdict)]).expect("restore");
+            let listed = registry.list();
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].session_id, "");
+            assert_eq!(listed[0].expected.display(), "<hashed>");
+            // The first valid operator action rebinds to the new session.
+            assert_eq!(
+                registry.reconcile("sess-new", "file:///a", "resume", live),
+                Ok(expected)
+            );
+            assert_eq!(registry.list()[0].session_id, "sess-new");
+            // After the rebind, other sessions are rejected again.
+            assert_eq!(
+                registry.reconcile("sess-other", "file:///a", "resume", live),
+                Err(RecoveryError::SessionMismatch)
+            );
+            assert_eq!(
+                registry.acknowledge("sess-new", "file:///a", "resume"),
+                Ok(())
+            );
+            assert!(registry.list().is_empty());
+        }
+    }
+
+    #[test]
+    fn restored_verdict_survives_and_ack_rebinds_without_reconcile() {
+        let salt = [1u8; recovery_codec::SALT_BYTES];
+        let records = vec![recovery_codec::PersistedTarget {
+            uri: "file:///a".to_owned(),
+            range: (0, 6),
+            expected_hash: recovery_codec::salted_hash(&salt, "resume"),
+            replacement_hash: recovery_codec::salted_hash(&salt, "restored"),
+            kind: recovery_codec::PersistedKind::Blocked {
+                verdict: Some(RecoveryVerdict::ConflictHumanReview),
+            },
+            generation: 2,
+            request_id: "operator".to_owned(),
+        }];
+        let mut registry = RecoveryRegistry::restore(4, salt, records).expect("restore");
+        // A recorded verdict is replayed without re-evaluating, for any live
+        // text, and the target acks straight away after rebind.
+        assert_eq!(
+            registry.reconcile("sess-new", "file:///a", "resume", "whatever"),
+            Ok(RecoveryVerdict::ConflictHumanReview)
+        );
+        assert_eq!(
+            registry.acknowledge("sess-new", "file:///a", "resume"),
+            Ok(())
+        );
+        assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn hashed_text_without_salt_fails_closed() {
+        let hashed = RecoveryText::Hashed([9u8; 32]);
+        assert!(!hashed.matches(None, "anything"));
+        let plain = RecoveryText::Plain("resume".to_owned());
+        assert!(plain.matches(None, "resume"));
+        assert!(!plain.matches(None, "other"));
+    }
+
+    #[test]
+    fn ambiguous_ledger_entries_are_pinned_and_saturation_fails_closed() {
+        let mut ledger = BoundedRequestLedger::new(2).expect("non-zero capacity");
+        assert_eq!(
+            ledger.record("amb-1", "c1", ambiguous_loss_outcome()),
+            RecordOutcome::Inserted
+        );
+        assert_eq!(
+            ledger.record("def-1", "c2", LedgerOutcome::Definite("applied".into())),
+            RecordOutcome::Inserted
+        );
+        // Eviction skips the pinned ambiguous head and takes the definite.
+        assert_eq!(
+            ledger.record("def-2", "c3", LedgerOutcome::Definite("applied".into())),
+            RecordOutcome::Evicted {
+                evicted: "def-1".to_owned()
+            }
+        );
+        assert_eq!(
+            ledger.classify("amb-1", "c1"),
+            RequestDisposition::Duplicate(ambiguous_loss_outcome())
+        );
+        // An all-ambiguous full ledger refuses to record: never forget.
+        assert_eq!(
+            ledger.record("amb-2", "c4", ambiguous_loss_outcome()),
+            RecordOutcome::Evicted {
+                evicted: "def-2".to_owned()
+            }
+        );
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(
+            ledger.record("amb-3", "c5", ambiguous_loss_outcome()),
+            RecordOutcome::RejectedLedgerFull
+        );
+        assert_eq!(ledger.len(), 2);
+        assert_eq!(
+            ledger.classify("amb-1", "c1"),
+            RequestDisposition::Duplicate(ambiguous_loss_outcome())
+        );
+        assert_eq!(ledger.classify("amb-3", "c5"), RequestDisposition::Fresh);
+    }
+
+    #[test]
+    fn recovery_backed_ambiguous_entries_evict_while_unbacked_stay_pinned() {
+        let mut ledger = BoundedRequestLedger::new(2).expect("non-zero capacity");
+        // Backed ambiguous: the durable recovery record exists, so the
+        // ledger may forget the result and stay bounded.
+        assert_eq!(
+            ledger.record_with_recovery("back-1", "c1", ambiguous_loss_outcome()),
+            RecordOutcome::Inserted
+        );
+        assert_eq!(
+            ledger.record_with_recovery("back-2", "c2", ambiguous_loss_outcome()),
+            RecordOutcome::Inserted
+        );
+        // Both entries are ambiguous but recovery-backed: eviction proceeds.
+        assert_eq!(
+            ledger.record("def-1", "c3", LedgerOutcome::Definite("applied".into())),
+            RecordOutcome::Evicted {
+                evicted: "back-1".to_owned()
+            }
+        );
+        assert_eq!(ledger.len(), 2);
+        // Unbacked ambiguous entries at capacity still refuse to record.
+        let mut pinned = BoundedRequestLedger::new(1).expect("non-zero capacity");
+        assert_eq!(
+            pinned.record("free-1", "c1", ambiguous_loss_outcome()),
+            RecordOutcome::Inserted
+        );
+        assert_eq!(
+            pinned.record("def-1", "c2", LedgerOutcome::Definite("x".into())),
+            RecordOutcome::RejectedLedgerFull
+        );
+        assert_eq!(
+            pinned.record_with_recovery("def-2", "c3", LedgerOutcome::Definite("x".into())),
+            RecordOutcome::RejectedLedgerFull
+        );
+        assert_eq!(pinned.len(), 1);
     }
 }

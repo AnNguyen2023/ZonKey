@@ -3,6 +3,7 @@
 //! This crate has no event source implementation. It accepts mock sources and
 //! typed values from `zonkey-types`; it never observes hardware or edits text.
 
+pub mod recovery_codec;
 pub mod transport;
 
 #[cfg(test)]

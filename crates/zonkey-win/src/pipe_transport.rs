@@ -283,7 +283,7 @@ pub fn handoff_payload(request: &zonkey_service::transport::HandoffRequest) -> S
 
 /// Spawns a dummy-host server that additionally answers read-only `HANDOFF`
 /// queries from a [`HandoffProvider`] and operator `RECOVERY` commands from
-/// an optional shared [`RecoveryRegistry`].
+/// an optional shared durable [`crate::recovery_store::DurableRecoveryStore`].
 ///
 /// # Errors
 ///
@@ -298,7 +298,7 @@ pub fn spawn_dummy_host_server_with_handoff(
     ledger_capacity: usize,
     handler: RequestHandler,
     handoff: Option<HandoffProvider>,
-    recovery: Option<Arc<std::sync::Mutex<zonkey_service::transport::RecoveryRegistry>>>,
+    recovery: Option<Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
 ) -> Result<PipeServerHandle, PipeError> {
     let pipe_name = pipe_name.to_owned();
     let session_id = next_session_id()?;
@@ -387,7 +387,7 @@ fn serve_connection(
     session_id: &str,
     handler: &RequestHandler,
     handoff: Option<&HandoffProvider>,
-    recovery: Option<&Arc<std::sync::Mutex<zonkey_service::transport::RecoveryRegistry>>>,
+    recovery: Option<&Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
 ) {
     let mut buffer: Vec<u8> = Vec::new();
     loop {
@@ -461,21 +461,30 @@ fn serve_connection(
             }
             continue;
         }
+        if let Some(request) = payload.strip_prefix("REQX|") {
+            if !serve_descriptor_request(handle, endpoint, recovery, session_id, request, handler) {
+                return;
+            }
+            continue;
+        }
         // Unknown well-formed payloads are ignored fail-closed: drop.
         return;
     }
 }
 
-/// Operator recovery commands (M3D-28), reusing the session-bound framing:
-/// `RECOVERY|<session>|LIST`, `RECOVERY|<session>|BLOCK|<uri>|<expected>|
-/// <replacement>|<start>|<end>`, `RECOVERY|<session>|RECONCILE|<uri>|
-/// <expected>|<live-range-text>`, and `RECOVERY|<session>|ACK|<uri>|
+/// Operator recovery commands (M3D-28/M3D-31), reusing the session-bound
+/// framing: `RECOVERY|<session>|LIST`, `RECOVERY|<session>|BLOCK|<uri>|
+/// <expected>|<replacement>|<start>|<end>`, `RECOVERY|<session>|RECONCILE|
+/// <uri>|<expected>|<live-range-text>`, and `RECOVERY|<session>|ACK|<uri>|
 /// <expected>`. Every answer is a definitive transport result; failures are
 /// `recovery-error:<reason>` strings, never mutations, never retries.
+/// Recovery state is the M3D-31 durable store: mutations are write-through
+/// to the bounded state file, and an unreadable durable state answers
+/// every command with a typed fail-closed error.
 fn handle_recovery_command(
     endpoint: &HostTransportEndpoint,
     command: &str,
-    recovery: Option<&Arc<std::sync::Mutex<zonkey_service::transport::RecoveryRegistry>>>,
+    recovery: Option<&Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
 ) -> String {
     let mut parts = command.split('|');
     let Some(command_session) = parts.next() else {
@@ -484,32 +493,48 @@ fn handle_recovery_command(
     if endpoint.check_session(command_session).is_err() {
         return "recovery-error:SessionMismatch".to_owned();
     }
-    let Some(registry) = recovery else {
+    let Some(store) = recovery else {
         return "recovery-error:RecoveryUnavailable".to_owned();
     };
-    let Ok(mut registry) = registry.lock() else {
+    let Ok(mut store) = store.lock() else {
         return "recovery-error:RegistryLocked".to_owned();
     };
-    match parts.next() {
-        Some("LIST") => {
-            let targets = registry.list();
-            let mut text = format!("recovery-list|{}", targets.len());
-            for target in targets {
-                let state = match target.state {
-                    None => "awaiting".to_owned(),
-                    Some((verdict, acknowledged)) => {
-                        format!("{verdict:?}|acked={acknowledged}")
-                    }
-                };
-                text.push('\u{1}');
-                text.push_str(&target.uri);
-                text.push('\u{1}');
-                text.push_str(&target.expected);
-                text.push('\u{1}');
-                text.push_str(&state);
-            }
-            text
+    let map_store_error = |error: crate::recovery_store::RecoveryStoreError| match error {
+        crate::recovery_store::RecoveryStoreError::StateUnreadable(code) => {
+            format!("recovery-error:StateUnreadable:{code:?}")
         }
+        crate::recovery_store::RecoveryStoreError::Unavailable => {
+            "recovery-error:StateUnavailable".to_owned()
+        }
+        crate::recovery_store::RecoveryStoreError::WriteFailed => {
+            "recovery-error:StateWriteFailed".to_owned()
+        }
+        crate::recovery_store::RecoveryStoreError::Registry(reason) => {
+            format!("recovery-error:{reason:?}")
+        }
+    };
+    match parts.next() {
+        Some("LIST") => match store.list() {
+            Ok(targets) => {
+                let mut text = format!("recovery-list|{}", targets.len());
+                for target in targets {
+                    let state = match target.state {
+                        None => "awaiting".to_owned(),
+                        Some((verdict, acknowledged)) => {
+                            format!("{verdict:?}|acked={acknowledged}")
+                        }
+                    };
+                    text.push('\u{1}');
+                    text.push_str(&target.uri);
+                    text.push('\u{1}');
+                    text.push_str(&target.expected.display());
+                    text.push('\u{1}');
+                    text.push_str(&state);
+                }
+                text
+            }
+            Err(error) => map_store_error(error),
+        },
         Some("BLOCK") => {
             let (Some(uri), Some(expected), Some(replacement), Some(start), Some(end)) = (
                 parts.next(),
@@ -523,9 +548,9 @@ fn handle_recovery_command(
             let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
                 return "recovery-error:MalformedCommand".to_owned();
             };
-            match registry.block(command_session, uri, expected, replacement, (start, end)) {
-                Some(evicted) => format!("recovery-blocked|evicted={evicted}"),
-                None => "recovery-blocked".to_owned(),
+            match store.block(command_session, uri, expected, replacement, (start, end)) {
+                Ok(_) => "recovery-blocked".to_owned(),
+                Err(error) => map_store_error(error),
             }
         }
         Some("RECONCILE") => {
@@ -541,18 +566,18 @@ fn handle_recovery_command(
             } else {
                 format!("{live}|{}", tail.join("|"))
             };
-            match registry.reconcile(command_session, uri, expected, &live) {
+            match store.reconcile(command_session, uri, expected, &live) {
                 Ok(verdict) => format!("recovery-verdict:{verdict:?}"),
-                Err(error) => format!("recovery-error:{error:?}"),
+                Err(error) => map_store_error(error),
             }
         }
         Some("ACK") => {
             let (Some(uri), Some(expected)) = (parts.next(), parts.next()) else {
                 return "recovery-error:MalformedCommand".to_owned();
             };
-            match registry.acknowledge(command_session, uri, expected) {
+            match store.acknowledge(command_session, uri, expected) {
                 Ok(()) => "recovery-acked".to_owned(),
-                Err(error) => format!("recovery-error:{error:?}"),
+                Err(error) => map_store_error(error),
             }
         }
         _ => "recovery-error:MalformedCommand".to_owned(),
@@ -569,6 +594,187 @@ fn parse_request(payload: &str) -> Option<(&str, &str, &str, &str)> {
         return None;
     }
     Some((session, request_id, composition, canonical))
+}
+
+/// Parses one descriptor-carrying request body (everything after `REQX|`):
+/// `<session>|<request_id>|<composition>|<uri>|<start>|<end>|<expected>|
+/// <replacement>|<generation>|<canonical tail>`. The UTF-16 range is
+/// host-owned snapshot data carried verbatim; it is never derived from
+/// service token lengths.
+fn parse_descriptor_request(
+    payload: &str,
+) -> Option<(
+    &str,
+    zonkey_service::transport::RecoveryDescriptor,
+    &str,
+    &str,
+)> {
+    let mut parts = payload.splitn(10, '|');
+    let session = parts.next()?;
+    let request_id = parts.next()?;
+    let composition = parts.next()?;
+    let uri = parts.next()?;
+    let start = parts.next()?;
+    let end = parts.next()?;
+    let expected = parts.next()?;
+    let replacement = parts.next()?;
+    let generation = parts.next()?;
+    let canonical = parts.next()?;
+    let (Ok(start), Ok(end), Ok(generation)) = (
+        start.parse::<usize>(),
+        end.parse::<usize>(),
+        generation.parse::<u64>(),
+    ) else {
+        return None;
+    };
+    if session.is_empty()
+        || request_id.is_empty()
+        || composition.is_empty()
+        || uri.is_empty()
+        || expected.is_empty()
+        || replacement.is_empty()
+        || canonical.is_empty()
+        || start > end
+    {
+        return None;
+    }
+    Some((
+        session,
+        zonkey_service::transport::RecoveryDescriptor {
+            request_id: request_id.to_owned(),
+            uri: uri.to_owned(),
+            range: (start, end),
+            expected: expected.to_owned(),
+            replacement: replacement.to_owned(),
+            generation,
+        },
+        composition,
+        canonical,
+    ))
+}
+
+/// Serves one descriptor-carrying request (`REQX`) under the M3D-31 durable
+/// preflight rule. Returns false when the connection must be dropped.
+fn serve_descriptor_request(
+    handle: HANDLE,
+    endpoint: &mut HostTransportEndpoint,
+    recovery: Option<&Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
+    _session_id: &str,
+    request: &str,
+    handler: &RequestHandler,
+) -> bool {
+    let Some((request_session, descriptor, composition, canonical)) =
+        parse_descriptor_request(request)
+    else {
+        return false;
+    };
+    let request_id = descriptor.request_id.clone();
+    if endpoint.check_session(request_session).is_err() {
+        return write_frame(handle, "ERROR|session_mismatch").is_ok();
+    }
+    let mut executed_fresh = false;
+    let outcome = match endpoint.classify_request(&request_id, canonical) {
+        RequestDisposition::Duplicate(recorded) => recorded,
+        RequestDisposition::Conflict => LedgerOutcome::Definite("request_id_reuse".to_owned()),
+        RequestDisposition::Fresh => {
+            executed_fresh = true;
+            execute_descriptor_request(
+                endpoint,
+                recovery,
+                request_session,
+                &descriptor,
+                composition,
+                canonical,
+                handler,
+            )
+        }
+    };
+    // Resolve the durable intent only after the delivery attempt: a
+    // delivered definitive rejection clears it; a delivered uncertain
+    // outcome promotes it; a failed delivery promotes it (ADR 0036
+    // disconnect rule).
+    if write_frame(handle, &outcome_payload(&outcome)).is_ok() {
+        if executed_fresh {
+            resolve_pending(recovery, request_session, &request_id, &outcome);
+        }
+        return true;
+    }
+    if executed_fresh {
+        promote_after_loss(recovery, request_session, &request_id);
+    }
+    false
+}
+
+/// Executes one fresh descriptor-carrying request under the M3D-31 durable
+/// preflight rule: a PendingRecovery record must exist durably before the
+/// request may proceed. The durable intent is left open here; the caller
+/// resolves it with [`resolve_pending`] or [`promote_after_loss`] after the
+/// delivery attempt. No mutation path exists — the handler is the same
+/// fail-closed request handler used for plain requests.
+fn execute_descriptor_request(
+    endpoint: &mut HostTransportEndpoint,
+    recovery: Option<&Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
+    _session_id: &str,
+    descriptor: &zonkey_service::transport::RecoveryDescriptor,
+    composition: &str,
+    canonical: &str,
+    handler: &RequestHandler,
+) -> LedgerOutcome {
+    let Some(store) = recovery else {
+        return LedgerOutcome::Definite("rejected:RecoveryUnavailable".to_owned());
+    };
+    let Ok(mut store) = store.lock() else {
+        return LedgerOutcome::Definite("rejected:RecoveryUnavailable".to_owned());
+    };
+    // A blocked logical target never reaches execution, before or after a
+    // restart, until reconciliation plus owner acknowledgement.
+    if store.target_blocked(&descriptor.uri, &descriptor.expected) {
+        return LedgerOutcome::Definite("rejected:TargetBlocked".to_owned());
+    }
+    // Durable preflight: only after durable success may the request proceed.
+    if store.begin_pending(descriptor).is_err() {
+        return LedgerOutcome::Definite("rejected:RecoveryPreflightFailed".to_owned());
+    }
+    let outcome = handler(&descriptor.request_id, composition, canonical);
+    endpoint.record_with_recovery(&descriptor.request_id, canonical, outcome.clone());
+    outcome
+}
+
+/// Resolves an open durable intent after a delivered outcome: only a
+/// definitive rejection with no mutation possibility clears it; Applied,
+/// ambiguous, and any other definite outcome promote it to a block.
+fn resolve_pending(
+    recovery: Option<&Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
+    session_id: &str,
+    request_id: &str,
+    outcome: &LedgerOutcome,
+) {
+    let uncertain = match outcome {
+        LedgerOutcome::Ambiguous(_) => true,
+        LedgerOutcome::Definite(text) => !text.starts_with("rejected:"),
+    };
+    if let Some(store) = recovery
+        && let Ok(mut store) = store.lock()
+    {
+        if uncertain {
+            let _ = store.promote_pending(session_id, request_id);
+        } else {
+            let _ = store.clear_pending(request_id);
+        }
+    }
+}
+
+/// Promotes a pending intent after the response could not be delivered.
+fn promote_after_loss(
+    recovery: Option<&Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
+    session_id: &str,
+    request_id: &str,
+) {
+    if let Some(store) = recovery
+        && let Ok(mut store) = store.lock()
+    {
+        let _ = store.promote_pending(session_id, request_id);
+    }
 }
 
 fn outcome_payload(outcome: &LedgerOutcome) -> String {
@@ -707,6 +913,78 @@ impl PipeClient {
             canonical,
             timeout,
         )
+    }
+
+    /// Sends one descriptor-carrying request and awaits its result. The
+    /// descriptor makes the request participate in the M3D-31 durable
+    /// preflight lifecycle on the server; no mutation path exists and the
+    /// same fail-closed handler answers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same transport errors as [`PipeClient::request`];
+    /// callers must map loss to `Indeterminate` and never retry
+    /// automatically.
+    pub fn request_with_descriptor(
+        &mut self,
+        descriptor: &zonkey_service::transport::RecoveryDescriptor,
+        composition: &str,
+        canonical: &str,
+        timeout: Duration,
+    ) -> Result<LedgerOutcome, PipeError> {
+        if self.broken {
+            return Err(PipeError::ConnectionLost);
+        }
+        let handle = self.handle.ok_or(PipeError::ConnectionLost)?;
+        let session = self.session_id.clone();
+        let payload = format!(
+            "REQX|{session}|{}|{composition}|{}|{}|{}|{}|{}|{}|{canonical}",
+            descriptor.request_id,
+            descriptor.uri,
+            descriptor.range.0,
+            descriptor.range.1,
+            descriptor.expected,
+            descriptor.replacement,
+            descriptor.generation,
+        );
+        self.descriptor_request_on(handle, &payload, timeout)
+    }
+
+    fn descriptor_request_on(
+        &mut self,
+        handle: HANDLE,
+        payload: &str,
+        timeout: Duration,
+    ) -> Result<LedgerOutcome, PipeError> {
+        if write_frame(handle, payload).is_err() {
+            self.broken = true;
+            return Err(PipeError::ConnectionLost);
+        }
+        match read_frame_with_timeout(handle, timeout) {
+            Ok(frame) => {
+                if let Some(reason) = frame.payload.strip_prefix("ERROR|") {
+                    return Err(match reason {
+                        "session_mismatch" => PipeError::SessionMismatch,
+                        other => PipeError::HandshakeRefused(other.to_owned()),
+                    });
+                }
+                match parse_outcome(&frame.payload) {
+                    Ok(outcome) => Ok(outcome),
+                    Err(error) => {
+                        self.broken = true;
+                        Err(error)
+                    }
+                }
+            }
+            Err(PipeError::Timeout | PipeError::ConnectionLost) => {
+                self.broken = true;
+                Err(PipeError::Timeout)
+            }
+            Err(other) => {
+                self.broken = true;
+                Err(other)
+            }
+        }
     }
 
     fn request_on(
@@ -925,6 +1203,7 @@ fn read_frame_with_timeout(handle: HANDLE, timeout: Duration) -> Result<Frame, P
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recovery_store::DurableRecoveryStore;
     use std::sync::atomic::AtomicUsize;
     use zonkey_service::transport::ambiguous_loss_outcome;
 
@@ -933,6 +1212,12 @@ mod tests {
             r"\\.\pipe\zonkey-m3d20-{tag}-{}",
             SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    fn recovery_store_dir(tag: &str) -> crate::recovery_store::DurableRecoveryStore {
+        let unique = crate::pipe_security::random_nonce_hex(8).expect("nonce");
+        let dir = std::env::temp_dir().join(format!("zonkey-m3d31-pipe-{tag}-{unique}"));
+        crate::recovery_store::DurableRecoveryStore::open_in(&dir, 4)
     }
 
     fn counting_handler() -> (RequestHandler, Arc<AtomicUsize>) {
@@ -1248,9 +1533,7 @@ mod tests {
     #[test]
     fn recovery_lifecycle_over_pipe() {
         let name = pipe_name("recovery");
-        let registry = Arc::new(std::sync::Mutex::new(
-            zonkey_service::transport::RecoveryRegistry::new(4).expect("capacity"),
-        ));
+        let registry = Arc::new(std::sync::Mutex::new(recovery_store_dir("lifecycle")));
         let (handler, _calls) = counting_handler();
         let server = spawn_dummy_host_server_with_handoff(
             &name,
@@ -1422,9 +1705,7 @@ mod tests {
     #[test]
     fn recovery_applied_and_conflict_verdicts_over_pipe() {
         let name = pipe_name("recovery-verdicts");
-        let registry = Arc::new(std::sync::Mutex::new(
-            zonkey_service::transport::RecoveryRegistry::new(4).expect("capacity"),
-        ));
+        let registry = Arc::new(std::sync::Mutex::new(recovery_store_dir("verdicts")));
         let (handler, _calls) = counting_handler();
         let server = spawn_dummy_host_server_with_handoff(
             &name,
@@ -1458,6 +1739,241 @@ mod tests {
         client
             .recovery_command("ACK|file:///b|t2", Duration::from_secs(5))
             .expect("ack");
+        client.close();
+        server.shutdown();
+    }
+
+    fn test_descriptor(tag: &str) -> zonkey_service::transport::RecoveryDescriptor {
+        zonkey_service::transport::RecoveryDescriptor {
+            request_id: format!("reqx-{tag}"),
+            uri: "file:///reqx-doc".to_owned(),
+            range: (0, 6),
+            expected: "resume".to_owned(),
+            replacement: "restored".to_owned(),
+            generation: 1,
+        }
+    }
+
+    fn ambiguous_handler() -> RequestHandler {
+        Arc::new(|_request_id: &str, _composition: &str, _canonical: &str| {
+            LedgerOutcome::Ambiguous("lost_in_test".to_owned())
+        })
+    }
+
+    #[test]
+    fn reqx_definitive_rejection_clears_pending_durably() {
+        let name = pipe_name("reqx-reject");
+        let store = Arc::new(std::sync::Mutex::new(recovery_store_dir("reqx-reject")));
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            composition_gate_handler(),
+            None,
+            Some(Arc::clone(&store)),
+        )
+        .expect("server");
+        let mut client = connect(&server);
+        let outcome = client
+            .request_with_descriptor(
+                &test_descriptor("reject"),
+                "Unknown",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect("gated");
+        assert_eq!(
+            outcome,
+            LedgerOutcome::Definite("rejected:CompositionUnknown".to_owned())
+        );
+        client.close();
+        server.shutdown();
+        // The definitive no-mutation rejection removed the pending intent:
+        // a restart starts clean for this target.
+        let reloaded =
+            DurableRecoveryStore::open_in(store.lock().expect("store lock").directory(), 8);
+        assert!(reloaded.list().expect("list").is_empty());
+        assert!(!reloaded.target_blocked("file:///reqx-doc", "resume"));
+    }
+
+    #[test]
+    fn reqx_ambiguous_outcome_promotes_block_and_restart_requires_ack() {
+        let name = pipe_name("reqx-ambiguous");
+        let dir = {
+            let store = recovery_store_dir("reqx-ambiguous");
+            let dir = store.directory().to_path_buf();
+            drop(store);
+            dir
+        };
+        let store = Arc::new(std::sync::Mutex::new(DurableRecoveryStore::open_in(
+            &dir, 8,
+        )));
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            ambiguous_handler(),
+            None,
+            Some(Arc::clone(&store)),
+        )
+        .expect("server");
+        let mut client = connect(&server);
+        let outcome = client
+            .request_with_descriptor(
+                &test_descriptor("lost"),
+                "Unknown",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect("ambiguous reply");
+        assert!(matches!(outcome, LedgerOutcome::Ambiguous(_)));
+        client.close();
+        server.shutdown();
+        // Restart: the promoted target must reload as blocked.
+        let reloaded = DurableRecoveryStore::open_in(&dir, 8);
+        let listed = reloaded.list().expect("list");
+        assert_eq!(listed.len(), 1, "lost response => blocked target");
+        assert_eq!(listed[0].uri, "file:///reqx-doc");
+        // A new server over the reloaded state refuses the same target.
+        let name_two = pipe_name("reqx-ambiguous-2");
+        let store_two = Arc::new(std::sync::Mutex::new(reloaded));
+        let server_two = spawn_dummy_host_server_with_handoff(
+            &name_two,
+            8,
+            ambiguous_handler(),
+            None,
+            Some(Arc::clone(&store_two)),
+        )
+        .expect("second server");
+        let mut client = connect(&server_two);
+        let blocked = client
+            .request_with_descriptor(
+                &test_descriptor("retry"),
+                "Unknown",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect("blocked reply");
+        assert_eq!(
+            blocked,
+            LedgerOutcome::Definite("rejected:TargetBlocked".to_owned())
+        );
+        // Only reconcile + owner ack unblocks the target.
+        assert_eq!(
+            client.recovery_command(
+                "RECONCILE|file:///reqx-doc|resume|restored",
+                Duration::from_secs(5)
+            ),
+            Ok("recovery-verdict:AppliedAcknowledged".to_owned())
+        );
+        client
+            .recovery_command("ACK|file:///reqx-doc|resume", Duration::from_secs(5))
+            .expect("ack");
+        let unblocked = client
+            .request_with_descriptor(
+                &test_descriptor("after-ack"),
+                "Unknown",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect("reply after ack");
+        assert_ne!(
+            unblocked,
+            LedgerOutcome::Definite("rejected:TargetBlocked".to_owned())
+        );
+        client.close();
+        server_two.shutdown();
+    }
+
+    #[test]
+    fn reqx_client_disconnect_after_send_promotes_blocked() {
+        let name = pipe_name("reqx-disconnect");
+        let store = Arc::new(std::sync::Mutex::new(recovery_store_dir("reqx-disconnect")));
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            composition_gate_handler(),
+            None,
+            Some(Arc::clone(&store)),
+        )
+        .expect("server");
+        // Raw client: complete the handshake, send REQX, vanish before the
+        // result can be read.
+        let dropped = open_raw_handle(&server.pipe_name, Duration::from_secs(5)).expect("open");
+        write_frame(dropped, &format!("HELLO|{TRANSPORT_PROTOCOL_ID}")).expect("hello");
+        let welcome = read_frame_with_timeout(dropped, HANDSHAKE_TIMEOUT).expect("welcome");
+        let session = welcome.payload.strip_prefix("WELCOME|").expect("session");
+        write_frame(
+            dropped,
+            &format!(
+                "REQX|{session}|reqx-drop|Unknown|file:///reqx-doc|0|6|resume|restored|1|{{canonical}}"
+            ),
+        )
+        .expect("send");
+        let _ = unsafe { CloseHandle(dropped) };
+        // The server promotes the pending intent after the failed write;
+        // poll the shared store deterministically.
+        let mut promoted = false;
+        for _ in 0..200 {
+            if let Ok(store) = store.lock()
+                && store.list().map_or(0, |listed| listed.len()) == 1
+            {
+                promoted = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(promoted, "disconnect after send must promote the block");
+        server.shutdown();
+        let reloaded =
+            DurableRecoveryStore::open_in(store.lock().expect("store lock").directory(), 8);
+        assert_eq!(reloaded.list().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn reqx_preflight_failure_never_executes() {
+        let dir = {
+            let store = recovery_store_dir("reqx-poison");
+            let dir = store.directory().to_path_buf();
+            drop(store);
+            dir
+        };
+        // Corrupt the state file so the store is poisoned: preflight must
+        // fail closed and the handler must never run.
+        let path = dir.join("recovery-state.bin");
+        let mut bytes = std::fs::read(&path).expect("state");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&path, bytes).expect("corrupt");
+        let store = Arc::new(std::sync::Mutex::new(DurableRecoveryStore::open_in(
+            &dir, 8,
+        )));
+        assert!(store.lock().expect("lock").poison().is_some());
+        let (handler, calls) = counting_handler();
+        let name = pipe_name("reqx-poison");
+        let server =
+            spawn_dummy_host_server_with_handoff(&name, 8, handler, None, Some(Arc::clone(&store)))
+                .expect("server");
+        let mut client = connect(&server);
+        let outcome = client
+            .request_with_descriptor(
+                &test_descriptor("poison"),
+                "Inactive",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect("fail-closed reply");
+        // A poisoned store is fail-closed both at the blocked-target gate
+        // and at preflight; either typed rejection proves the request never
+        // became mutation-eligible.
+        assert!(
+            matches!(
+                &outcome,
+                LedgerOutcome::Definite(text)
+                    if text == "rejected:RecoveryPreflightFailed"
+                        || text == "rejected:TargetBlocked"
+            ),
+            "outcome={outcome:?}"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "never executed");
         client.close();
         server.shutdown();
     }
