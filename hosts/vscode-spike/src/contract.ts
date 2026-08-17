@@ -107,6 +107,7 @@ export type RejectReason =
   | "HostIdentityMismatch"
   | "SessionMismatch"
   | "TargetIdentityMismatch"
+  | "MultipleEditors"
   | "RevisionMismatch"
   | "TextMismatch"
   | "RangeMismatch"
@@ -139,6 +140,7 @@ export type HostResult =
 export type SnapshotRefusalReason =
   | "NoActiveEditor"
   | "MultiSelection"
+  | "MultipleEditors"
   | "SelectionNotEmpty"
   | "RangeInvalid"
   | "CandidateMismatch";

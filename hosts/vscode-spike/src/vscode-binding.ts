@@ -112,6 +112,17 @@ export function createRealBinding(): HostBindingPort {
       return documentEpochs.get(document) ?? Number.NaN;
     },
 
+    visibleEditorCount(document: TextDocumentPort): number {
+      // The active editor's document is compared by URI across every
+      // visible editor: a split view or the same file in multiple tabs is
+      // ambiguous for the one-active-editor scope and must reject.
+      return vscode.window.visibleTextEditors.filter(
+        (editor) =>
+          editor.document.uri.scheme === "file" &&
+          editor.document.uri.toString() === document.uri,
+      ).length;
+    },
+
     editorId(editor: TextEditorPort): number {
       return editorIds.get(editor) ?? Number.NaN;
     },

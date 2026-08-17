@@ -359,3 +359,109 @@ test("ledger capacity must be a positive integer", () => {
   assert.throws(() => new VsCodeHostAdapter(w.binding, -1), RangeError);
   assert.throws(() => new VsCodeHostAdapter(w.binding, 1.5), RangeError);
 });
+
+test("M3D-32: second window (distinct extension-host session) is a distinct identity", async () => {
+  const windowA = world("resume");
+  const requestFromA = request(windowA, "req-x1");
+  // Same host metadata, different window: each VS Code window runs its own
+  // extension host with its own session id.
+  const windowB = world("resume");
+  windowB.binding.host_id = windowA.binding.host_id;
+  windowB.binding.session_id = "session-of-window-b";
+  // Epoch and editor ids may coincide numerically across windows; identity
+  // still stays distinct through the session binding.
+  assert.equal(
+    windowB.binding.documentEpoch(windowB.doc),
+    windowA.binding.documentEpoch(windowA.doc),
+  );
+  rejected(await windowB.adapter.apply(requestFromA), "SessionMismatch");
+});
+
+test("M3D-32: same document and session keep a stable identity across reconnects", async () => {
+  const w = world("resume");
+  const first = request(w, "req-s1");
+  const outcome = await w.adapter.apply(first);
+  assert.deepEqual(outcome, { kind: "Applied", new_revision: 2 });
+  // A reconnect in the same lifecycle reuses the same session and replays
+  // the same request from the ledger instead of reapplying.
+  const replay = await w.adapter.apply(first);
+  assert.deepEqual(replay, { kind: "Applied", new_revision: 2 });
+  assert.equal(w.editor.editAttempts, 1);
+});
+
+test("M3D-32: extension-host restart invalidates the old session identity", async () => {
+  const w = world("resume");
+  const stale = request(w, "req-r1");
+  assert.deepEqual(await w.adapter.apply(stale), { kind: "Applied", new_revision: 2 });
+  // Restart: the extension host yields a new session id and the ledger is
+  // invalidated; the stale request rejects on the session check.
+  w.binding.session_id = "session-after-restart";
+  w.adapter.invalidateSession();
+  rejected(await w.adapter.apply(stale), "SessionMismatch");
+});
+
+test("M3D-32: in-place reload keeps the epoch but rejects stale revisions", async () => {
+  const w = world("resume");
+  const stale = request(w, "req-l1");
+  const epochBefore = w.binding.documentEpoch(w.doc);
+  w.doc.reload("resume ");
+  assert.equal(w.binding.documentEpoch(w.doc), epochBefore);
+  rejected(await w.adapter.apply(stale), "RevisionMismatch");
+});
+
+test("M3D-32: two visible editors for one document reject", async () => {
+  const w = world("resume");
+  // Capture while the scope is still unambiguous, then split the view.
+  const prebuilt = request(w, "req-m1");
+  w.binding.visibleEditors = 2;
+  const refused = w.adapter.captureSnapshot({ expected_text: "resume", replacement: "restored" });
+  assert.ok(!refused.ok && refused.reason === "MultipleEditors");
+  rejected(await w.adapter.apply(prebuilt), "MultipleEditors");
+  w.binding.visibleEditors = 1;
+  const recovered = w.adapter.captureSnapshot({ expected_text: "resume", replacement: "restored" });
+  assert.ok(recovered.ok);
+});
+
+test("M3D-32: close/reopen of the same URI yields a new epoch identity", async () => {
+  const w = world("resume");
+  const stale = request(w, "req-e1");
+  const oldEpoch = w.binding.documentEpoch(w.doc);
+  // Close and reopen the same URI as a fresh document object.
+  const reopened = new FakeDocument(w.doc.uri, "resume");
+  const reopenedEditor = new FakeEditor(reopened);
+  reopenedEditor.setCaret("resume".length);
+  w.binding.activeEditor = reopenedEditor;
+  const newEpoch = w.binding.documentEpoch(reopened);
+  assert.notEqual(newEpoch, oldEpoch);
+  rejected(await w.adapter.apply(stale), "TargetIdentityMismatch");
+  const fresh = request(w, "req-e2");
+  assert.deepEqual(await w.adapter.apply(fresh), { kind: "Applied", new_revision: 2 });
+});
+
+test("M3D-32: unknown protocol schema fails closed", async () => {
+  const w = world("resume");
+  const future = request(w, "req-p1");
+  future.protocol_id = "zonkey.vscode-host/9";
+  rejected(await w.adapter.apply(future), "ProtocolMismatch");
+});
+
+test("M3D-32: epoch numbering never collides across distinct URIs", () => {
+  const w = world("resume");
+  const other = new FakeDocument("file:///d:/spike/other.txt", "resume");
+  const otherEditor = new FakeEditor(other);
+  otherEditor.setCaret("resume".length);
+  // Both documents are the first open instance of their URI: equal epoch
+  // numbers are legal, and identity comparisons stay per-URI correct.
+  assert.equal(w.binding.documentEpoch(w.doc), w.binding.documentEpoch(other));
+  const identityA = {
+    document_uri: w.doc.uri,
+    document_epoch: w.binding.documentEpoch(w.doc),
+    editor_id: w.binding.editorId(w.editor),
+  };
+  const identityB = {
+    document_uri: other.uri,
+    document_epoch: w.binding.documentEpoch(other),
+    editor_id: w.binding.editorId(otherEditor),
+  };
+  assert.notDeepEqual(identityA, identityB);
+});

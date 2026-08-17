@@ -107,15 +107,15 @@ async function runInner(): Promise<void> {
   assert.ok(listed.includes(SENTINEL), "listed target carries the real token");
   // Ack before reconciliation is rejected.
   assert.equal(
-    await client.recoveryCommand(`ACK|${uri}|${SENTINEL}`, 10_000),
+    await client.recoveryCommand(`ACK|${uri}|${SENTINEL}|0`, 10_000),
     "recovery-error:AckBeforeReconcile",
   );
   // Contradictory readback: conflict for human review, then ack to unblock.
   assert.equal(
-    await client.recoveryCommand(`RECONCILE|${uri}|${SENTINEL}|mangled!`, 10_000),
+    await client.recoveryCommand(`RECONCILE|${uri}|${SENTINEL}|0|mangled!`, 10_000),
     "recovery-verdict:ConflictHumanReview",
   );
-  assert.equal(await client.recoveryCommand(`ACK|${uri}|${SENTINEL}`, 10_000), "recovery-acked");
+  assert.equal(await client.recoveryCommand(`ACK|${uri}|${SENTINEL}|0`, 10_000), "recovery-acked");
   assert.equal(await client.recoveryCommand("LIST", 10_000), "recovery-list|0");
 
   // Second cycle: the exact host readback equals the original rendered text,
@@ -128,10 +128,10 @@ async function runInner(): Promise<void> {
     "recovery-blocked",
   );
   assert.equal(
-    await client.recoveryCommand(`RECONCILE|${uri}|${SENTINEL}|${liveReadback}`, 10_000),
+    await client.recoveryCommand(`RECONCILE|${uri}|${SENTINEL}|0|${liveReadback}`, 10_000),
     "recovery-verdict:NotApplied",
   );
-  assert.equal(await client.recoveryCommand(`ACK|${uri}|${SENTINEL}`, 10_000), "recovery-acked");
+  assert.equal(await client.recoveryCommand(`ACK|${uri}|${SENTINEL}|0`, 10_000), "recovery-acked");
   assert.equal(await client.recoveryCommand("LIST", 10_000), "recovery-list|0");
 
   currentStep = "invariants";

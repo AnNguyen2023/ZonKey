@@ -65,6 +65,16 @@ export class FakeDocument implements TextDocumentPort {
   setTextSilently(text: string): void {
     this.currentText = text;
   }
+
+  /**
+   * In-place reload (for example revert-from-disk): the document object and
+   * therefore the open-instance epoch are retained, the text is replaced,
+   * and the revision advances — stale snapshots fail the revision check.
+   */
+  reload(text: string): void {
+    this.currentText = text;
+    this.currentVersion += 1;
+  }
 }
 
 export class FakeEditor implements TextEditorPort {
@@ -117,6 +127,8 @@ export class FakeBinding implements HostBindingPort {
   secureState: SecureState = "KnownNonSecure";
   activeEditor: TextEditorPort | undefined;
   capabilities: Capabilities = { ...HARNESS_CAPABILITIES };
+  /** Visible editors showing the active document; > 1 is ambiguous. */
+  visibleEditors = 1;
 
   private readonly epochs = new WeakMap<object, number>();
   private readonly epochCounters = new Map<string, number>();
@@ -125,6 +137,10 @@ export class FakeBinding implements HostBindingPort {
 
   getActiveEditor(): TextEditorPort | undefined {
     return this.activeEditor;
+  }
+
+  visibleEditorCount(_document: TextDocumentPort): number {
+    return this.visibleEditors;
   }
 
   documentEpoch(document: TextDocumentPort): number {

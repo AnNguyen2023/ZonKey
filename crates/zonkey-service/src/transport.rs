@@ -442,6 +442,10 @@ pub struct RecoveryDescriptor {
     pub replacement: String,
     /// Service-local plan generation at capture time.
     pub generation: u64,
+    /// Host document open-instance epoch at capture time (M3D-32); carried
+    /// verbatim from the host snapshot and persisted with any promoted
+    /// recovery target. Zero when the host supplied no epoch.
+    pub document_epoch: u64,
 }
 
 /// The canonical outcome for a request whose result was lost to a timeout or
@@ -655,6 +659,9 @@ pub struct BlockedTarget {
     pub state: Option<(RecoveryVerdict, bool)>,
     /// Service-local plan generation at block time; zero when unavailable.
     pub generation: u64,
+    /// Host document open-instance epoch this target was bound to; zero for
+    /// operator-created blocks with no epoch binding (M3D-32).
+    pub document_epoch: u64,
 }
 
 /// Fail-closed registry errors for the recovery workflow.
@@ -670,6 +677,11 @@ pub enum RecoveryError {
     /// (unresolved blocks); new blocks are rejected until the operator
     /// reconciles and acknowledges existing targets (ADR 0035).
     RegistryFull,
+    /// A restored target carries a document open-instance epoch binding and
+    /// the operator command supplied a different (or omitted) epoch: the
+    /// rebind is refused and the target stays blocked (M3D-32; URI match
+    /// alone never authorizes a rebind).
+    EpochMismatch,
 }
 
 /// Bounded registry implementing the ADR 0030 recovery lifecycle: an
@@ -743,6 +755,7 @@ impl RecoveryRegistry {
                     range: record.range,
                     state: verdict.map(|verdict| (verdict, false)),
                     generation: record.generation,
+                    document_epoch: record.document_epoch,
                 },
             );
         }
@@ -805,6 +818,7 @@ impl RecoveryRegistry {
         expected: &str,
         replacement: &str,
         range: (usize, usize),
+        document_epoch: u64,
     ) -> Result<Option<String>, RecoveryError> {
         let key = self.resolve_key(uri, expected);
         if !self.entries.contains_key(&key) && self.order.len() == self.capacity {
@@ -823,6 +837,7 @@ impl RecoveryRegistry {
                 range,
                 state: None,
                 generation: 0,
+                document_epoch,
             },
         );
         Ok(None)
@@ -837,22 +852,36 @@ impl RecoveryRegistry {
             .collect()
     }
 
+    /// The epoch gate for rebinding a restored (unbound) target: a target
+    /// carrying a nonzero document epoch only rebinds when the operator
+    /// command supplies exactly that epoch. Omitting the epoch (zero) on an
+    /// epoch-bound target refuses the rebind — URI match alone never
+    /// authorizes attaching old recovery state to a reopened document.
+    fn rebind_allowed(target: &BlockedTarget, document_epoch: u64) -> bool {
+        target.document_epoch == 0 || target.document_epoch == document_epoch
+    }
+
     /// Runs the reconciliation readback against live range text supplied by
     /// the host snapshot; idempotent (a second call returns the recorded
     /// verdict without re-evaluating). A target restored from durable state
     /// has an empty session id; the first valid operator action rebinds it
-    /// to the calling session. Hashed (restored) entries compare by salted
-    /// hash and fail closed without the file salt.
+    /// to the calling session — but only when the supplied document epoch
+    /// matches an epoch-bound target. Hashed (restored) entries compare by
+    /// salted hash and fail closed without the file salt.
     ///
     /// # Errors
     ///
-    /// Returns [`RecoveryError::UnknownTarget`] or
-    /// [`RecoveryError::SessionMismatch`].
+    /// Returns [`RecoveryError::UnknownTarget`],
+    /// [`RecoveryError::SessionMismatch`], or
+    /// [`RecoveryError::EpochMismatch`] when an epoch-bound restored target
+    /// is addressed with a different epoch; the target stays blocked and
+    /// unbound.
     pub fn reconcile(
         &mut self,
         session_id: &str,
         uri: &str,
         expected: &str,
+        document_epoch: u64,
         live_range_text: &str,
     ) -> Result<RecoveryVerdict, RecoveryError> {
         let key = self.resolve_key(uri, expected);
@@ -862,6 +891,9 @@ impl RecoveryRegistry {
             .get_mut(&key)
             .ok_or(RecoveryError::UnknownTarget)?;
         if target.session_id.is_empty() {
+            if !Self::rebind_allowed(target, document_epoch) {
+                return Err(RecoveryError::EpochMismatch);
+            }
             session_id.clone_into(&mut target.session_id);
         } else if target.session_id != session_id {
             return Err(RecoveryError::SessionMismatch);
@@ -882,17 +914,19 @@ impl RecoveryRegistry {
 
     /// Explicit operator acknowledgement; only valid after reconciliation.
     /// A successful acknowledgement removes the block. A target restored
-    /// from durable state rebinds to the calling session first.
+    /// from durable state rebinds to the calling session first, under the
+    /// same epoch gate as reconciliation.
     ///
     /// # Errors
     ///
     /// Returns [`RecoveryError`] for unknown targets, session mismatches,
-    /// or acknowledgements before reconciliation.
+    /// epoch mismatches, or acknowledgements before reconciliation.
     pub fn acknowledge(
         &mut self,
         session_id: &str,
         uri: &str,
         expected: &str,
+        document_epoch: u64,
     ) -> Result<(), RecoveryError> {
         let key = self.resolve_key(uri, expected);
         let target = self
@@ -900,6 +934,9 @@ impl RecoveryRegistry {
             .get_mut(&key)
             .ok_or(RecoveryError::UnknownTarget)?;
         if target.session_id.is_empty() {
+            if !Self::rebind_allowed(target, document_epoch) {
+                return Err(RecoveryError::EpochMismatch);
+            }
             session_id.clone_into(&mut target.session_id);
         } else if target.session_id != session_id {
             return Err(RecoveryError::SessionMismatch);
@@ -1542,32 +1579,32 @@ mod tests {
         let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
         assert!(registry.list().is_empty());
         assert_eq!(
-            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6)),
+            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6), 0),
             Ok(None)
         );
         assert_eq!(registry.list().len(), 1);
         // Ack before reconciliation is rejected.
         assert_eq!(
-            registry.acknowledge("sess-1", "file:///a", "resume"),
+            registry.acknowledge("sess-1", "file:///a", "resume", 0),
             Err(RecoveryError::AckBeforeReconcile)
         );
         // All three deterministic verdicts.
         assert_eq!(
-            registry.reconcile("sess-1", "file:///a", "resume", "restored"),
+            registry.reconcile("sess-1", "file:///a", "resume", 0, "restored"),
             Ok(RecoveryVerdict::AppliedAcknowledged)
         );
         // Duplicate reconciliation is idempotent.
         assert_eq!(
-            registry.reconcile("sess-1", "file:///a", "resume", "restored"),
+            registry.reconcile("sess-1", "file:///a", "resume", 0, "restored"),
             Ok(RecoveryVerdict::AppliedAcknowledged)
         );
         assert_eq!(
-            registry.acknowledge("sess-1", "file:///a", "resume"),
+            registry.acknowledge("sess-1", "file:///a", "resume", 0),
             Ok(())
         );
         assert!(registry.list().is_empty());
         assert_eq!(
-            registry.acknowledge("sess-1", "file:///a", "resume"),
+            registry.acknowledge("sess-1", "file:///a", "resume", 0),
             Err(RecoveryError::UnknownTarget)
         );
     }
@@ -1576,29 +1613,29 @@ mod tests {
     fn recovery_registry_not_applied_and_conflict_verdicts() {
         let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
         assert_eq!(
-            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6)),
+            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6), 0),
             Ok(None)
         );
         assert_eq!(
-            registry.reconcile("sess-1", "file:///a", "resume", "resume"),
+            registry.reconcile("sess-1", "file:///a", "resume", 0, "resume"),
             Ok(RecoveryVerdict::NotApplied)
         );
         assert_eq!(
-            registry.acknowledge("sess-1", "file:///a", "resume"),
+            registry.acknowledge("sess-1", "file:///a", "resume", 0),
             Ok(())
         );
         assert_eq!(
-            registry.block("sess-1", "file:///b", "resume", "restored", (0, 6)),
+            registry.block("sess-1", "file:///b", "resume", "restored", (0, 6), 0),
             Ok(None)
         );
         assert_eq!(
-            registry.reconcile("sess-1", "file:///b", "resume", "mangled!"),
+            registry.reconcile("sess-1", "file:///b", "resume", 0, "mangled!"),
             Ok(RecoveryVerdict::ConflictHumanReview)
         );
         // Conflict still requires an explicit acknowledgement to unblock.
         assert_eq!(registry.list().len(), 1);
         assert_eq!(
-            registry.acknowledge("sess-1", "file:///b", "resume"),
+            registry.acknowledge("sess-1", "file:///b", "resume", 0),
             Ok(())
         );
         assert!(registry.list().is_empty());
@@ -1608,19 +1645,19 @@ mod tests {
     fn recovery_registry_rejects_wrong_session_and_unknown_targets() {
         let mut registry = RecoveryRegistry::new(4).expect("non-zero capacity");
         assert_eq!(
-            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6)),
+            registry.block("sess-1", "file:///a", "resume", "restored", (0, 6), 0),
             Ok(None)
         );
         assert_eq!(
-            registry.reconcile("sess-2", "file:///a", "resume", "restored"),
+            registry.reconcile("sess-2", "file:///a", "resume", 0, "restored"),
             Err(RecoveryError::SessionMismatch)
         );
         assert_eq!(
-            registry.acknowledge("sess-2", "file:///a", "resume"),
+            registry.acknowledge("sess-2", "file:///a", "resume", 0),
             Err(RecoveryError::SessionMismatch)
         );
         assert_eq!(
-            registry.reconcile("sess-1", "file:///missing", "resume", "x"),
+            registry.reconcile("sess-1", "file:///missing", "resume", 0, "x"),
             Err(RecoveryError::UnknownTarget)
         );
     }
@@ -1629,27 +1666,27 @@ mod tests {
     fn recovery_registry_full_of_unresolved_rejects_new_blocks() {
         let mut registry = RecoveryRegistry::new(2).expect("non-zero capacity");
         assert_eq!(
-            registry.block("sess-1", "file:///a", "t1", "r1", (0, 2)),
+            registry.block("sess-1", "file:///a", "t1", "r1", (0, 2), 0),
             Ok(None)
         );
         assert_eq!(
-            registry.block("sess-1", "file:///b", "t2", "r2", (0, 2)),
+            registry.block("sess-1", "file:///b", "t2", "r2", (0, 2), 0),
             Ok(None)
         );
         // Unresolved blocks are never evicted: a full registry rejects.
         assert_eq!(
-            registry.block("sess-1", "file:///c", "t3", "r3", (0, 2)),
+            registry.block("sess-1", "file:///c", "t3", "r3", (0, 2), 0),
             Err(RecoveryError::RegistryFull)
         );
         assert_eq!(registry.list().len(), 2);
         // Resolving and acknowledging one target frees capacity.
         assert_eq!(
-            registry.reconcile("sess-1", "file:///a", "t1", "r1"),
+            registry.reconcile("sess-1", "file:///a", "t1", 0, "r1"),
             Ok(RecoveryVerdict::AppliedAcknowledged)
         );
-        assert_eq!(registry.acknowledge("sess-1", "file:///a", "t1"), Ok(()));
+        assert_eq!(registry.acknowledge("sess-1", "file:///a", "t1", 0), Ok(()));
         assert_eq!(
-            registry.block("sess-1", "file:///c", "t3", "r3", (0, 2)),
+            registry.block("sess-1", "file:///c", "t3", "r3", (0, 2), 0),
             Ok(None)
         );
     }
@@ -1664,6 +1701,7 @@ mod tests {
             replacement_hash: recovery_codec::salted_hash(&salt, "restored"),
             kind: recovery_codec::PersistedKind::Blocked { verdict },
             generation: 1,
+            document_epoch: 0,
             request_id: "operator".to_owned(),
         };
         for (verdict, live, expected) in [
@@ -1679,17 +1717,17 @@ mod tests {
             assert_eq!(listed[0].expected.display(), "<hashed>");
             // The first valid operator action rebinds to the new session.
             assert_eq!(
-                registry.reconcile("sess-new", "file:///a", "resume", live),
+                registry.reconcile("sess-new", "file:///a", "resume", 0, live),
                 Ok(expected)
             );
             assert_eq!(registry.list()[0].session_id, "sess-new");
             // After the rebind, other sessions are rejected again.
             assert_eq!(
-                registry.reconcile("sess-other", "file:///a", "resume", live),
+                registry.reconcile("sess-other", "file:///a", "resume", 0, live),
                 Err(RecoveryError::SessionMismatch)
             );
             assert_eq!(
-                registry.acknowledge("sess-new", "file:///a", "resume"),
+                registry.acknowledge("sess-new", "file:///a", "resume", 0),
                 Ok(())
             );
             assert!(registry.list().is_empty());
@@ -1708,17 +1746,18 @@ mod tests {
                 verdict: Some(RecoveryVerdict::ConflictHumanReview),
             },
             generation: 2,
+            document_epoch: 0,
             request_id: "operator".to_owned(),
         }];
         let mut registry = RecoveryRegistry::restore(4, salt, records).expect("restore");
         // A recorded verdict is replayed without re-evaluating, for any live
         // text, and the target acks straight away after rebind.
         assert_eq!(
-            registry.reconcile("sess-new", "file:///a", "resume", "whatever"),
+            registry.reconcile("sess-new", "file:///a", "resume", 0, "whatever"),
             Ok(RecoveryVerdict::ConflictHumanReview)
         );
         assert_eq!(
-            registry.acknowledge("sess-new", "file:///a", "resume"),
+            registry.acknowledge("sess-new", "file:///a", "resume", 0),
             Ok(())
         );
         assert!(registry.list().is_empty());
@@ -1731,6 +1770,68 @@ mod tests {
         let plain = RecoveryText::Plain("resume".to_owned());
         assert!(plain.matches(None, "resume"));
         assert!(!plain.matches(None, "other"));
+    }
+
+    #[test]
+    fn epoch_bound_restored_target_rebinds_only_on_exact_epoch() {
+        let salt = [0xCDu8; recovery_codec::SALT_BYTES];
+        let record = recovery_codec::PersistedTarget {
+            uri: "file:///doc".to_owned(),
+            range: (0, 6),
+            expected_hash: recovery_codec::salted_hash(&salt, "resume"),
+            replacement_hash: recovery_codec::salted_hash(&salt, "restored"),
+            kind: recovery_codec::PersistedKind::Blocked { verdict: None },
+            generation: 1,
+            document_epoch: 5,
+            request_id: "req-orig".to_owned(),
+        };
+        let mut registry = RecoveryRegistry::restore(4, salt, vec![record]).expect("restore");
+        // URI + token alone (epoch omitted or wrong) never authorizes the
+        // rebind: the target stays blocked and unbound.
+        for wrong_epoch in [0, 4, 6] {
+            assert_eq!(
+                registry.reconcile("sess-new", "file:///doc", "resume", wrong_epoch, "restored"),
+                Err(RecoveryError::EpochMismatch),
+                "epoch={wrong_epoch}"
+            );
+        }
+        assert_eq!(registry.list()[0].session_id, "");
+        assert!(registry.is_blocked("file:///doc", "resume"));
+        assert_eq!(
+            registry.acknowledge("sess-new", "file:///doc", "resume", 0),
+            Err(RecoveryError::EpochMismatch)
+        );
+        // The exact document epoch rebinds and reconciles normally.
+        assert_eq!(
+            registry.reconcile("sess-new", "file:///doc", "resume", 5, "restored"),
+            Ok(RecoveryVerdict::AppliedAcknowledged)
+        );
+        assert_eq!(registry.list()[0].session_id, "sess-new");
+        assert_eq!(
+            registry.acknowledge("sess-new", "file:///doc", "resume", 5),
+            Ok(())
+        );
+        assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn epoch_free_restored_target_keeps_previous_rebind_semantics() {
+        let salt = [0xCEu8; recovery_codec::SALT_BYTES];
+        let record = recovery_codec::PersistedTarget {
+            uri: "file:///doc".to_owned(),
+            range: (0, 6),
+            expected_hash: recovery_codec::salted_hash(&salt, "resume"),
+            replacement_hash: recovery_codec::salted_hash(&salt, "restored"),
+            kind: recovery_codec::PersistedKind::Blocked { verdict: None },
+            generation: 1,
+            document_epoch: 0,
+            request_id: "operator".to_owned(),
+        };
+        let mut registry = RecoveryRegistry::restore(4, salt, vec![record]).expect("restore");
+        assert_eq!(
+            registry.reconcile("sess-new", "file:///doc", "resume", 0, "resume"),
+            Ok(RecoveryVerdict::NotApplied)
+        );
     }
 
     #[test]

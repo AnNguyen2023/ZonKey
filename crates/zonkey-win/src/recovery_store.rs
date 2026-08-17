@@ -283,6 +283,7 @@ impl DurableRecoveryStore {
             replacement_hash: recovery_codec::salted_hash(salt, &descriptor.replacement),
             kind: PersistedKind::Pending,
             generation: descriptor.generation,
+            document_epoch: descriptor.document_epoch,
             request_id: descriptor.request_id.clone(),
         }));
         records
@@ -420,6 +421,7 @@ impl DurableRecoveryStore {
                     &descriptor.expected,
                     &descriptor.replacement,
                     descriptor.range,
+                    descriptor.document_epoch,
                 )
                 .is_ok();
             Ok(blocked)
@@ -442,11 +444,13 @@ impl DurableRecoveryStore {
         range: (usize, usize),
     ) -> Result<Option<String>, RecoveryStoreError> {
         self.mutate_state(|registry, _pending| {
-            registry.block(session_id, uri, expected, replacement, range)
+            registry.block(session_id, uri, expected, replacement, range, 0)
         })
     }
 
-    /// Durable reconciliation; see [`RecoveryRegistry::reconcile`].
+    /// Durable reconciliation; see [`RecoveryRegistry::reconcile`]. The
+    /// operator-supplied document epoch gates the rebind of epoch-bound
+    /// restored targets (M3D-32).
     ///
     /// # Errors
     ///
@@ -456,14 +460,17 @@ impl DurableRecoveryStore {
         session_id: &str,
         uri: &str,
         expected: &str,
+        document_epoch: u64,
         live_range_text: &str,
     ) -> Result<RecoveryVerdict, RecoveryStoreError> {
         self.mutate_state(|registry, _pending| {
-            registry.reconcile(session_id, uri, expected, live_range_text)
+            registry.reconcile(session_id, uri, expected, document_epoch, live_range_text)
         })
     }
 
     /// Durable owner acknowledgement; see [`RecoveryRegistry::acknowledge`].
+    /// The operator-supplied document epoch gates the rebind of epoch-bound
+    /// restored targets (M3D-32).
     ///
     /// # Errors
     ///
@@ -473,8 +480,11 @@ impl DurableRecoveryStore {
         session_id: &str,
         uri: &str,
         expected: &str,
+        document_epoch: u64,
     ) -> Result<(), RecoveryStoreError> {
-        self.mutate_state(|registry, _pending| registry.acknowledge(session_id, uri, expected))
+        self.mutate_state(|registry, _pending| {
+            registry.acknowledge(session_id, uri, expected, document_epoch)
+        })
     }
 }
 
@@ -515,6 +525,7 @@ fn into_persisted(
             verdict: target.state.map(|(verdict, _)| verdict),
         },
         generation: target.generation,
+        document_epoch: target.document_epoch,
         request_id: request_id.to_owned(),
     }
 }
@@ -601,11 +612,11 @@ mod tests {
         // The first valid operator action rebinds to the new session and
         // the verdict comes from the salted-hash comparison.
         assert_eq!(
-            reloaded.reconcile("sess-new", "file:///a", "resume", "restored"),
+            reloaded.reconcile("sess-new", "file:///a", "resume", 0, "restored"),
             Ok(RecoveryVerdict::AppliedAcknowledged)
         );
         assert_eq!(
-            reloaded.acknowledge("sess-new", "file:///a", "resume"),
+            reloaded.acknowledge("sess-new", "file:///a", "resume", 0),
             Ok(())
         );
         // The acknowledgement is durable: a further restart starts empty.
@@ -626,7 +637,7 @@ mod tests {
                 .block("sess-1", "file:///a", "resume", "restored", (0, 6))
                 .expect("block");
             assert_eq!(
-                store.reconcile("sess-1", "file:///a", "resume", live),
+                store.reconcile("sess-1", "file:///a", "resume", 0, live),
                 Ok(verdict)
             );
             let mut reloaded = DurableRecoveryStore::open_in(&dir, 8);
@@ -634,11 +645,11 @@ mod tests {
             assert_eq!(listed.len(), 1, "blocked target survives restart");
             // The recorded verdict replays without re-evaluating.
             assert_eq!(
-                reloaded.reconcile("sess-9", "file:///a", "resume", "anything-else"),
+                reloaded.reconcile("sess-9", "file:///a", "resume", 0, "anything-else"),
                 Ok(verdict)
             );
             assert_eq!(
-                reloaded.acknowledge("sess-9", "file:///a", "resume"),
+                reloaded.acknowledge("sess-9", "file:///a", "resume", 0),
                 Ok(())
             );
         }
@@ -734,7 +745,7 @@ mod tests {
             .block("sess-1", "file:///a", "resume", "restored", (0, 6))
             .expect("block");
         store
-            .reconcile("sess-1", "file:///a", "resume", "restored")
+            .reconcile("sess-1", "file:///a", "resume", 0, "restored")
             .expect("reconcile");
         let bytes = std::fs::read(dir.join(STATE_FILE_NAME)).expect("state");
         assert!(!bytes.windows(6).any(|window| window == b"resume"));
@@ -835,6 +846,7 @@ mod tests {
             expected: "resume".to_owned(),
             replacement: "restored".to_owned(),
             generation: 5,
+            document_epoch: 0,
         }
     }
 
@@ -881,10 +893,14 @@ mod tests {
         assert_eq!(listed[0].session_id, "sess-1");
         // Reconcile + ack unblocks, durably.
         assert_eq!(
-            store.reconcile("sess-1", "file:///doc", "resume", "restored"),
+            store.reconcile("sess-1", "file:///doc", "resume", 0, "restored"),
             Ok(zonkey_service::transport::RecoveryVerdict::AppliedAcknowledged)
         );
-        assert!(store.acknowledge("sess-1", "file:///doc", "resume").is_ok());
+        assert!(
+            store
+                .acknowledge("sess-1", "file:///doc", "resume", 0)
+                .is_ok()
+        );
         let reloaded = DurableRecoveryStore::open_in(&dir, 8);
         assert!(reloaded.list().expect("list").is_empty());
         assert!(!reloaded.target_blocked("file:///doc", "resume"));

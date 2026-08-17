@@ -79,6 +79,9 @@ export class VsCodeHostAdapter {
     if (editor === undefined) {
       return { ok: false, reason: "NoActiveEditor" };
     }
+    if (this.binding.visibleEditorCount(editor.document) > 1) {
+      return { ok: false, reason: "MultipleEditors" };
+    }
     if (editor.selectionCount !== 1) {
       return { ok: false, reason: "MultiSelection" };
     }
@@ -191,6 +194,9 @@ export class VsCodeHostAdapter {
     const editor = this.binding.getActiveEditor();
     if (editor === undefined) {
       return { kind: "Rejected", reason: "TargetIdentityMismatch" };
+    }
+    if (this.binding.visibleEditorCount(editor.document) > 1) {
+      return { kind: "Rejected", reason: "MultipleEditors" };
     }
     const document = editor.document;
     const text = document.getText();

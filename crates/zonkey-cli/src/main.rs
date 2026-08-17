@@ -74,7 +74,7 @@ fn main() {
             let arguments = std::env::args().skip(2).collect::<Vec<_>>();
             if let Err(message) = run_recovery_command(&arguments) {
                 eprintln!(
-                    "usage: recovery --pipe <name> <list|block|reconcile|ack> [args] ({message})"
+                    "usage: recovery --pipe <name> <list|block uri expected replacement start end|reconcile uri expected epoch live|ack uri expected epoch> ({message})"
                 );
                 std::process::exit(2);
             }
@@ -133,10 +133,18 @@ fn run_recovery_command(arguments: &[String]) -> Result<(), String> {
             }
             format!("BLOCK|{uri}|{expected}|{replacement}|{start}|{end}")
         }
-        ["reconcile", uri, expected, live] => {
-            format!("RECONCILE|{uri}|{expected}|{live}")
+        ["reconcile", uri, expected, epoch, live] => {
+            if epoch.parse::<u64>().is_err() {
+                return Err("document epoch must be an integer".to_owned());
+            }
+            format!("RECONCILE|{uri}|{expected}|{epoch}|{live}")
         }
-        ["ack", uri, expected] => format!("ACK|{uri}|{expected}"),
+        ["ack", uri, expected, epoch] => {
+            if epoch.parse::<u64>().is_err() {
+                return Err("document epoch must be an integer".to_owned());
+            }
+            format!("ACK|{uri}|{expected}|{epoch}")
+        }
         _ => return Err("unknown recovery command".to_owned()),
     };
     zonkey_win::pipe_transport::PipeClient::connect(&pipe_name, std::time::Duration::from_secs(8))

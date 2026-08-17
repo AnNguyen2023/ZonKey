@@ -553,35 +553,51 @@ fn handle_recovery_command(
                 Err(error) => map_store_error(error),
             }
         }
-        Some("RECONCILE") => {
-            let (Some(uri), Some(expected), Some(live)) =
+        Some("RECONCILE") => match parse_reconcile(parts) {
+            Some((uri, expected, document_epoch, live)) => {
+                match store.reconcile(command_session, uri, expected, document_epoch, &live) {
+                    Ok(verdict) => format!("recovery-verdict:{verdict:?}"),
+                    Err(error) => map_store_error(error),
+                }
+            }
+            None => "recovery-error:MalformedCommand".to_owned(),
+        },
+        Some("ACK") => {
+            let (Some(uri), Some(expected), Some(epoch)) =
                 (parts.next(), parts.next(), parts.next())
             else {
                 return "recovery-error:MalformedCommand".to_owned();
             };
-            // The live range text may itself contain '|': rejoin the tail.
-            let tail: Vec<&str> = parts.collect();
-            let live = if tail.is_empty() {
-                live.to_owned()
-            } else {
-                format!("{live}|{}", tail.join("|"))
-            };
-            match store.reconcile(command_session, uri, expected, &live) {
-                Ok(verdict) => format!("recovery-verdict:{verdict:?}"),
-                Err(error) => map_store_error(error),
-            }
-        }
-        Some("ACK") => {
-            let (Some(uri), Some(expected)) = (parts.next(), parts.next()) else {
+            let Ok(document_epoch) = epoch.parse::<u64>() else {
                 return "recovery-error:MalformedCommand".to_owned();
             };
-            match store.acknowledge(command_session, uri, expected) {
+            match store.acknowledge(command_session, uri, expected, document_epoch) {
                 Ok(()) => "recovery-acked".to_owned(),
                 Err(error) => map_store_error(error),
             }
         }
         _ => "recovery-error:MalformedCommand".to_owned(),
     }
+}
+
+/// Parses the RECONCILE tail: `<uri>|<expected>|<epoch>|<live…>` where the
+/// live range text may itself contain '|' and is rejoined.
+fn parse_reconcile(mut parts: std::str::Split<'_, char>) -> Option<(&str, &str, u64, String)> {
+    let uri = parts.next()?;
+    let expected = parts.next()?;
+    let epoch = parts.next()?;
+    let live = parts.next()?;
+    let document_epoch = epoch.parse::<u64>().ok()?;
+    if uri.is_empty() || expected.is_empty() || live.is_empty() {
+        return None;
+    }
+    let tail: Vec<&str> = parts.collect();
+    let live = if tail.is_empty() {
+        live.to_owned()
+    } else {
+        format!("{live}|{}", tail.join("|"))
+    };
+    Some((uri, expected, document_epoch, live))
 }
 
 fn parse_request(payload: &str) -> Option<(&str, &str, &str, &str)> {
@@ -609,7 +625,7 @@ fn parse_descriptor_request(
     &str,
     &str,
 )> {
-    let mut parts = payload.splitn(10, '|');
+    let mut parts = payload.splitn(11, '|');
     let session = parts.next()?;
     let request_id = parts.next()?;
     let composition = parts.next()?;
@@ -619,11 +635,13 @@ fn parse_descriptor_request(
     let expected = parts.next()?;
     let replacement = parts.next()?;
     let generation = parts.next()?;
+    let document_epoch = parts.next()?;
     let canonical = parts.next()?;
-    let (Ok(start), Ok(end), Ok(generation)) = (
+    let (Ok(start), Ok(end), Ok(generation), Ok(document_epoch)) = (
         start.parse::<usize>(),
         end.parse::<usize>(),
         generation.parse::<u64>(),
+        document_epoch.parse::<u64>(),
     ) else {
         return None;
     };
@@ -647,6 +665,7 @@ fn parse_descriptor_request(
             expected: expected.to_owned(),
             replacement: replacement.to_owned(),
             generation,
+            document_epoch,
         },
         composition,
         canonical,
@@ -938,7 +957,7 @@ impl PipeClient {
         let handle = self.handle.ok_or(PipeError::ConnectionLost)?;
         let session = self.session_id.clone();
         let payload = format!(
-            "REQX|{session}|{}|{composition}|{}|{}|{}|{}|{}|{}|{canonical}",
+            "REQX|{session}|{}|{composition}|{}|{}|{}|{}|{}|{}|{}|{canonical}",
             descriptor.request_id,
             descriptor.uri,
             descriptor.range.0,
@@ -946,6 +965,7 @@ impl PipeClient {
             descriptor.expected,
             descriptor.replacement,
             descriptor.generation,
+            descriptor.document_epoch,
         );
         self.descriptor_request_on(handle, &payload, timeout)
     }
@@ -1560,25 +1580,25 @@ mod tests {
             .expect("list");
         assert!(listed.starts_with("recovery-list|1"), "list={listed}");
         assert_eq!(
-            client.recovery_command("ACK|file:///doc|resume", Duration::from_secs(5)),
+            client.recovery_command("ACK|file:///doc|resume|0", Duration::from_secs(5)),
             Ok("recovery-error:AckBeforeReconcile".to_owned())
         );
         assert_eq!(
             client.recovery_command(
-                "RECONCILE|file:///doc|resume|resume",
+                "RECONCILE|file:///doc|resume|0|resume",
                 Duration::from_secs(5)
             ),
             Ok("recovery-verdict:NotApplied".to_owned())
         );
         assert_eq!(
             client.recovery_command(
-                "RECONCILE|file:///doc|resume|resume",
+                "RECONCILE|file:///doc|resume|0|resume",
                 Duration::from_secs(5)
             ),
             Ok("recovery-verdict:NotApplied".to_owned())
         );
         assert_eq!(
-            client.recovery_command("ACK|file:///doc|resume", Duration::from_secs(5)),
+            client.recovery_command("ACK|file:///doc|resume|0", Duration::from_secs(5)),
             Ok("recovery-acked".to_owned())
         );
         assert_eq!(
@@ -1720,24 +1740,24 @@ mod tests {
             .recovery_command("BLOCK|file:///a|t1|r1|0|2", Duration::from_secs(5))
             .expect("block");
         assert_eq!(
-            client.recovery_command("RECONCILE|file:///a|t1|r1", Duration::from_secs(5)),
+            client.recovery_command("RECONCILE|file:///a|t1|0|r1", Duration::from_secs(5)),
             Ok("recovery-verdict:AppliedAcknowledged".to_owned())
         );
         client
-            .recovery_command("ACK|file:///a|t1", Duration::from_secs(5))
+            .recovery_command("ACK|file:///a|t1|0", Duration::from_secs(5))
             .expect("ack");
         client
             .recovery_command("BLOCK|file:///b|t2|r2|0|2", Duration::from_secs(5))
             .expect("block");
         assert_eq!(
             client.recovery_command(
-                "RECONCILE|file:///b|t2|zz|with|pipes",
+                "RECONCILE|file:///b|t2|0|zz|with|pipes",
                 Duration::from_secs(5)
             ),
             Ok("recovery-verdict:ConflictHumanReview".to_owned())
         );
         client
-            .recovery_command("ACK|file:///b|t2", Duration::from_secs(5))
+            .recovery_command("ACK|file:///b|t2|0", Duration::from_secs(5))
             .expect("ack");
         client.close();
         server.shutdown();
@@ -1751,6 +1771,7 @@ mod tests {
             expected: "resume".to_owned(),
             replacement: "restored".to_owned(),
             generation: 1,
+            document_epoch: 0,
         }
     }
 
@@ -1859,13 +1880,13 @@ mod tests {
         // Only reconcile + owner ack unblocks the target.
         assert_eq!(
             client.recovery_command(
-                "RECONCILE|file:///reqx-doc|resume|restored",
+                "RECONCILE|file:///reqx-doc|resume|0|restored",
                 Duration::from_secs(5)
             ),
             Ok("recovery-verdict:AppliedAcknowledged".to_owned())
         );
         client
-            .recovery_command("ACK|file:///reqx-doc|resume", Duration::from_secs(5))
+            .recovery_command("ACK|file:///reqx-doc|resume|0", Duration::from_secs(5))
             .expect("ack");
         let unblocked = client
             .request_with_descriptor(
@@ -1904,7 +1925,7 @@ mod tests {
         write_frame(
             dropped,
             &format!(
-                "REQX|{session}|reqx-drop|Unknown|file:///reqx-doc|0|6|resume|restored|1|{{canonical}}"
+                "REQX|{session}|reqx-drop|Unknown|file:///reqx-doc|0|6|resume|restored|1|0|{{canonical}}"
             ),
         )
         .expect("send");
@@ -1976,5 +1997,139 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 0, "never executed");
         client.close();
         server.shutdown();
+    }
+
+    #[test]
+    fn reqx_epoch_bound_recovery_rebinds_only_on_matching_epoch() {
+        let name = pipe_name("reqx-epoch");
+        let dir = {
+            let store = recovery_store_dir("reqx-epoch");
+            let dir = store.directory().to_path_buf();
+            drop(store);
+            dir
+        };
+        let store = Arc::new(std::sync::Mutex::new(DurableRecoveryStore::open_in(
+            &dir, 8,
+        )));
+        let server = spawn_dummy_host_server_with_handoff(
+            &name,
+            8,
+            ambiguous_handler(),
+            None,
+            Some(Arc::clone(&store)),
+        )
+        .expect("server");
+        // Descriptor with a host document epoch binding.
+        let descriptor = zonkey_service::transport::RecoveryDescriptor {
+            document_epoch: 3,
+            ..test_descriptor("epoch")
+        };
+        let mut client = connect(&server);
+        let outcome = client
+            .request_with_descriptor(
+                &descriptor,
+                "Unknown",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect("ambiguous reply");
+        assert!(matches!(outcome, LedgerOutcome::Ambiguous(_)));
+        client.close();
+        server.shutdown();
+        // Restart: the promoted target reloads blocked with the epoch.
+        let reloaded = DurableRecoveryStore::open_in(&dir, 8);
+        let listed = reloaded.list().expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].document_epoch, 3);
+        // Reconcile by URI + token alone (epoch 0) or wrong epoch refuses
+        // the rebind; the target stays blocked and unbound.
+        let name_two = pipe_name("reqx-epoch-2");
+        let store_two = Arc::new(std::sync::Mutex::new(reloaded));
+        let server_two = spawn_dummy_host_server_with_handoff(
+            &name_two,
+            8,
+            ambiguous_handler(),
+            None,
+            Some(Arc::clone(&store_two)),
+        )
+        .expect("second server");
+        let mut client = connect(&server_two);
+        for wrong in ["0", "2", "4"] {
+            assert_eq!(
+                client.recovery_command(
+                    &format!("RECONCILE|file:///reqx-doc|resume|{wrong}|restored"),
+                    Duration::from_secs(5)
+                ),
+                Ok("recovery-error:EpochMismatch".to_owned())
+            );
+        }
+        assert!(
+            store_two
+                .lock()
+                .expect("lock")
+                .list()
+                .expect("list")
+                .first()
+                .is_some_and(|target| target.session_id.is_empty())
+        );
+        // The exact epoch reconciles and acknowledges.
+        assert_eq!(
+            client.recovery_command(
+                "RECONCILE|file:///reqx-doc|resume|3|restored",
+                Duration::from_secs(5)
+            ),
+            Ok("recovery-verdict:AppliedAcknowledged".to_owned())
+        );
+        assert_eq!(
+            client.recovery_command("ACK|file:///reqx-doc|resume|3", Duration::from_secs(5)),
+            Ok("recovery-acked".to_owned())
+        );
+        client.close();
+        server_two.shutdown();
+    }
+
+    #[test]
+    fn reconnect_keeps_session_but_restart_rejects_old_session() {
+        let (handler, _calls) = counting_handler();
+        let name = pipe_name("session-lifecycle");
+        let first = spawn_dummy_host_server(&name, 8, Arc::clone(&handler)).expect("server");
+        let session = {
+            let mut client = connect(&first);
+            let session = client.session_id().to_owned();
+            client
+                .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+                .expect("works");
+            client.close();
+            session
+        };
+        // Reconnect within the same server lifecycle: same session id, and
+        // replay still resolves idempotently.
+        let mut reconnected = connect(&first);
+        assert_eq!(reconnected.session_id(), session);
+        let replay = reconnected
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+            .expect("replay");
+        assert_eq!(replay, LedgerOutcome::Definite("applied".to_owned()));
+        reconnected.close();
+        first.shutdown();
+        // Restart is a new lifecycle: new session id, and requests carrying
+        // the old session reject before execution.
+        let second = spawn_dummy_host_server(&name, 8, handler).expect("second server");
+        let mut client = connect(&second);
+        assert_ne!(client.session_id(), session);
+        let handle = client.handle.expect("handle");
+        let error = client
+            .request_on(
+                handle,
+                &session,
+                "req-2",
+                "Inactive",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect_err("old session rejected");
+        assert_eq!(error, PipeError::SessionMismatch);
+        client.close();
+        second.shutdown();
     }
 }

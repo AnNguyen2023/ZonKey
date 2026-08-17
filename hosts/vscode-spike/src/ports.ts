@@ -56,10 +56,19 @@ export interface HostBindingPort {
   getActiveEditor(): TextEditorPort | undefined;
   /**
    * Stable epoch for one open document instance. A closed and reopened
-   * document must yield a new epoch even for the same URI.
+   * document must yield a new epoch even for the same URI. An in-place
+   * reload (same document object) keeps the epoch; the revision then
+   * advances and stale snapshots fail the revision check.
    */
   documentEpoch(document: TextDocumentPort): number;
   /** Stable identity for one editor instance. */
   editorId(editor: TextEditorPort): number;
+  /**
+   * Number of currently visible editors showing this document. More than
+   * one (split view / same document in multiple tabs) is ambiguous for the
+   * one-active-editor scope and must reject; bindings that cannot answer
+   * default to one only when they already guarantee a single editor.
+   */
+  visibleEditorCount(document: TextDocumentPort): number;
   secureStateFor(documentUri: string): SecureState;
 }

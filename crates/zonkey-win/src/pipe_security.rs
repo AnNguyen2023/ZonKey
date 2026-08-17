@@ -52,11 +52,12 @@ use windows::Win32::Security::{
 };
 #[cfg(test)]
 use windows::Win32::Security::{GetKernelObjectSecurity, GetSecurityDescriptorDacl};
-use windows::Win32::System::Pipes::ImpersonateNamedPipeClient;
+use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, ImpersonateNamedPipeClient};
 #[cfg(test)]
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    GetCurrentProcess, GetCurrentThread, OpenProcess, OpenProcessToken, OpenThreadToken,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::core::PWSTR;
 
@@ -258,35 +259,82 @@ impl Drop for PipeSecurityAttributes {
 }
 
 /// Verifies that the peer on the other end of a connected server-side pipe
-/// handle is the current user, by impersonating the client at identification
-/// level, reading its token user SID, comparing it with the server's own SID,
-/// and always reverting before returning. Any failure is fail-closed: the
-/// caller must drop the connection without serving it. This is SID identity
-/// inspection, not cryptographic authentication.
+/// handle is the current user. Primary path: impersonate the client at
+/// identification level, read its token user SID, compare it with the
+/// server's own SID, and always revert. Clients that cannot request an
+/// identification-capable quality of service (for example Node's
+/// `net.connect`, which cannot pass `SECURITY_SQOS_PRESENT`) fall back to
+/// reading the *client process's* primary token user SID via
+/// `GetNamedPipeClientProcessId` — the compared identity is still the user
+/// SID; the process id is only the lookup handle and is never trusted as
+/// identity. Any failure of both paths is fail-closed: the caller must drop
+/// the connection without serving it. This is SID identity inspection, not
+/// cryptographic authentication.
 pub(crate) fn verify_peer_is_current_user(pipe_handle: HANDLE) -> Result<(), PipeSecurityError> {
     let own = current_user_sid()?;
-    if unsafe { ImpersonateNamedPipeClient(pipe_handle) }.is_err() {
-        return Err(PipeSecurityError::PeerImpersonationFailed);
-    }
-    let inspected = (|| {
-        let mut token = HANDLE::default();
-        if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, false, &raw mut token) }
-            .is_err()
-        {
-            return Err(PipeSecurityError::PeerTokenUnavailable);
+    // Primary path: impersonation at identification level. SQOS-incapable
+    // clients (Node's net.connect) make the impersonation call itself or
+    // the token inspection fail; any such failure falls through to the
+    // client-process-token path below instead of rejecting outright.
+    let impersonated = unsafe { ImpersonateNamedPipeClient(pipe_handle) }.is_ok();
+    let mut inspected = Err(PipeSecurityError::PeerImpersonationFailed);
+    if impersonated {
+        inspected = (|| {
+            let mut token = HANDLE::default();
+            if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, false, &raw mut token) }
+                .is_err()
+            {
+                return Err(PipeSecurityError::PeerTokenUnavailable);
+            }
+            let peer = token_user_sid(token);
+            let _ = unsafe { CloseHandle(token) };
+            let peer = peer.map_err(|_| PipeSecurityError::PeerTokenUnavailable)?;
+            if unsafe { EqualSid(peer.psid(), own.psid()) }.is_err() {
+                return Err(PipeSecurityError::PeerSidMismatch);
+            }
+            Ok(())
+        })();
+        // Always revert before any other outcome.
+        if unsafe { RevertToSelf() }.is_err() {
+            return Err(PipeSecurityError::RevertFailed);
         }
-        let peer = token_user_sid(token);
-        let _ = unsafe { CloseHandle(token) };
-        let peer = peer.map_err(|_| PipeSecurityError::PeerTokenUnavailable)?;
-        if unsafe { EqualSid(peer.psid(), own.psid()) }.is_err() {
-            return Err(PipeSecurityError::PeerSidMismatch);
-        }
-        Ok(())
-    })();
-    if unsafe { RevertToSelf() }.is_err() {
-        return Err(PipeSecurityError::RevertFailed);
     }
-    inspected
+    if inspected.is_ok() {
+        return Ok(());
+    }
+    // Fallback for SQOS-incapable clients: verify the user SID of the
+    // client process's primary token. Still SID comparison — the process id
+    // is a lookup handle, never the trusted identity.
+    verify_client_process_user(pipe_handle, &own)
+}
+
+/// Compares the client process's primary-token user SID with the server's
+/// own SID.
+fn verify_client_process_user(
+    pipe_handle: HANDLE,
+    own: &OwnedSid,
+) -> Result<(), PipeSecurityError> {
+    let mut client_pid = 0u32;
+    if unsafe { GetNamedPipeClientProcessId(pipe_handle, &raw mut client_pid) }.is_err() {
+        return Err(PipeSecurityError::PeerTokenUnavailable);
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, client_pid) };
+    let Ok(process) = process else {
+        return Err(PipeSecurityError::PeerTokenUnavailable);
+    };
+    let mut token = HANDLE::default();
+    let opened = unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) };
+    let _ = unsafe { CloseHandle(process) };
+    if opened.is_err() {
+        return Err(PipeSecurityError::PeerTokenUnavailable);
+    }
+    let peer = token_user_sid(token);
+    let _ = unsafe { CloseHandle(token) };
+    let peer = peer.map_err(|_| PipeSecurityError::PeerTokenUnavailable)?;
+    if unsafe { EqualSid(peer.psid(), own.psid()) }.is_err() {
+        return Err(PipeSecurityError::PeerSidMismatch);
+    }
+    Ok(())
 }
 
 /// Random bytes from the system-preferred RNG (`BCryptGenRandom`).

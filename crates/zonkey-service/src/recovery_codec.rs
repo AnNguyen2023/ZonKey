@@ -17,7 +17,7 @@ use crate::transport::RecoveryVerdict;
 /// File magic; version 1.
 pub const RECOVERY_STATE_MAGIC: [u8; 8] = *b"ZNKYREC1";
 /// Current format version.
-pub const RECOVERY_STATE_VERSION: u32 = 1;
+pub const RECOVERY_STATE_VERSION: u32 = 2;
 /// Hard cap on persisted records (ADR 0035 registry capacity).
 pub const MAX_RECOVERY_ENTRIES: usize = 128;
 /// Hard cap on the whole state file.
@@ -82,6 +82,9 @@ pub struct PersistedTarget {
     pub kind: PersistedKind,
     /// Service-local plan generation at block time.
     pub generation: u64,
+    /// Host document open-instance epoch bound to this target; zero when
+    /// the record carries no document-epoch binding (operator-created).
+    pub document_epoch: u64,
     /// Request id that created the record (pending preflight identity).
     pub request_id: String,
 }
@@ -361,6 +364,7 @@ pub fn encode(
             PersistedKind::Pending => payload.push(2),
         }
         push_u64(&mut payload, record.generation);
+        push_u64(&mut payload, record.document_epoch);
         push_u16(
             &mut payload,
             u16::try_from(request_id.len()).map_err(|_| RecoveryCodecError::EncodeOverflow)?,
@@ -485,6 +489,7 @@ fn decode_record(
         _ => return Err(RecoveryCodecError::Malformed),
     };
     let generation = read_u64(payload, cursor)?;
+    let document_epoch = read_u64(payload, cursor)?;
     let request_id_len = read_u16(payload, cursor)? as usize;
     if request_id_len == 0 || request_id_len > MAX_REQUEST_ID_BYTES {
         return Err(RecoveryCodecError::OversizedRecord);
@@ -510,6 +515,7 @@ fn decode_record(
         replacement_hash,
         kind,
         generation,
+        document_epoch,
         request_id,
     })
 }
@@ -527,6 +533,7 @@ mod tests {
             replacement_hash: salted_hash(&salt, "restored"),
             kind: PersistedKind::Blocked { verdict },
             generation: 3,
+            document_epoch: 7,
             request_id: "req-1".to_owned(),
         }
     }
@@ -540,6 +547,7 @@ mod tests {
             replacement_hash: salted_hash(&salt, "restored"),
             kind: PersistedKind::Pending,
             generation: 4,
+            document_epoch: 0,
             request_id: "req-pending-9".to_owned(),
         }
     }

@@ -909,6 +909,42 @@ rather than wrapping or reusing identity.
   design (it carries no logical-target metadata and cannot mutate; every
   handler outcome today is a deterministic rejection). See ADR 0036.
 
+#### M3D-32 - Host / session identity hardening - DONE
+
+- Host identity stays environment metadata (`appName:appHost:version`),
+  never a trust root; each VS Code window/extension host is a distinct
+  identity via its own `env.sessionId`; PID/HWND are never identity. The
+  transport session binds one server lifecycle: reconnect replays
+  idempotently with the same session; restart yields a new session and
+  old-session requests reject before execution (pipe-tested both ways).
+- Document identity keeps URI + open-instance epoch; close/reopen gets a
+  new epoch (stale snapshots reject `TargetIdentityMismatch`); in-place
+  reload is now explicit — same object/epoch, revision advances, stale
+  snapshots fail `RevisionMismatch`. More than one visible editor for one
+  URI (split view / multiple tabs) rejects `MultipleEditors` in both
+  capture and apply; the real binding counts `visibleTextEditors` by URI.
+- Recovery rebind under identity rules: `RecoveryDescriptor` carries the
+  host document epoch verbatim (never derived from token lengths);
+  persisted targets rebind only when the operator RECONCILE/ACK supplies
+  exactly that epoch — wrong or omitted epoch answers
+  `recovery-error:EpochMismatch` and leaves the target blocked/unbound;
+  URI + token alone never authorizes a rebind. Durable state format v2;
+  unknown (incl. prior) versions still poison fail-closed. CLI passes the
+  epoch through.
+- Real-E2E regression found and fixed: M3D-29's
+  `ImpersonateNamedPipeClient` fails for SQOS-incapable clients (Node
+  `net.connect` cannot set SQOS), which had dropped every extension-host
+  connection. Peer trust now falls back — still fail-closed — to the
+  client process's primary-token user SID via
+  `GetNamedPipeClientProcessId`/`OpenProcess`; compared identity remains
+  the user SID, the process id is only a lookup handle.
+- Verified by 8 new TS identity tests (second window, reconnect/restart,
+  reload semantics, multi-editor, close/reopen, unknown schema, per-URI
+  epoch non-collision) and Rust epoch-gate/reconnect-vs-restart pipe
+  tests; 234 workspace tests; npm 39/39 + typecheck; all four runnable
+  real-VSCode E2Es pass (validation, transport, handoff, recovery);
+  handoff-live remains owner-manual (needs live typing). See ADR 0037.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
