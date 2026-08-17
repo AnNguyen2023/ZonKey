@@ -831,6 +831,32 @@ rather than wrapping or reusing identity.
   full-workspace runs. No mutation, no Applied, `CompositionUnknown`
   unchanged. See ADR 0034.
 
+#### M3D-30 - Production ledger sizing / persistence review - DONE
+
+- Design-only review closing the ADR 0032 BLOCKS_RELEASE ledger item; no
+  implementation, real Applied still disabled, `CompositionUnknown`
+  fail-closed.
+- Capacities: ledger 256 (hard bound ≈ 32 MiB, typical ≈ 1 MiB), recovery
+  registry 128; new fail-closed eviction rules — ledger eviction of an
+  Ambiguous entry escalates to a blocked target, and the registry never
+  evicts unresolved blocks (full-and-unresolved ⇒ refuse new blocks).
+- Must survive restart: unresolved blocked targets with reconcile/ack
+  state only. Definite outcomes and sessions never persist (compare-and-
+  replace backstop; M3D-29 per-lifecycle sessions). Durable record = URI +
+  salted SHA-256 of expected/replacement + range + state; document text
+  never persists in plaintext.
+- Restart semantics: unresolved blocks ⇒ recovery-required mode (blocked
+  targets reject until reconcile + owner ack); persisted entries rebind to
+  the current session on first command; corrupt/torn state file fails
+  closed with a typed error, never defaults to "no blocks".
+- Storage model chosen: compact durable state file (≤ 256 KiB hard cap,
+  versioned + CRC32, temp-write → `FlushFileBuffers` →
+  `MoveFileExW(WRITE_THROUGH|REPLACE_EXISTING)`), single writer,
+  current-user-only DACL reusing the M3D-29 guard. Append-only journal and
+  no-persistence models evaluated and rejected for the release posture.
+- Verdict: **DURABLE_RECOVERY_MODEL_READY** — implementation is a separate
+  owner-approved milestone. See ADR 0035.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.
