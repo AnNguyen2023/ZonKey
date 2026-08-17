@@ -800,6 +800,37 @@ rather than wrapping or reusing identity.
   (`npm run test:recovery`) ending in an untouched document. No mutation,
   no Applied path, `CompositionUnknown` unchanged. See ADR 0033.
 
+#### M3D-29 - Named-pipe ACL / peer-truth hardening - DONE
+
+- Every created pipe instance carries an explicit DACL granting the
+  creating user's SID `GENERIC_ALL` and nothing else (`SetEntriesInAclW`);
+  the default process DACL is never used, so other interactive users,
+  `Everyone`, administrators, and `LOCAL SYSTEM` are denied by omission.
+  Admins can still take ownership and rewrite the DACL — documented
+  residual, not a defect. `FILE_FLAG_FIRST_PIPE_INSTANCE` fails creation
+  closed on name squatting; if the DACL, nonce, or peer inputs cannot be
+  built, no listener is created at all.
+- Peer truth for the single-user architecture = current-user SID, enforced
+  twice: OS DACL at connect, plus fail-closed server-side verification
+  (identification-level impersonation via `SECURITY_IDENTIFICATION` SQOS,
+  token user SID compare with `EqualSid`, always `RevertToSelf` before
+  serving). PID/HWND/pipe name are never trusted identity; no
+  cryptographic authentication is claimed.
+- Per-lifecycle identity: `generate_pipe_name` emits
+  `\\.\pipe\zonkey-<prefix>-<128-bit BCrypt nonce>`; session ids embed a
+  128-bit nonce. Restart ⇒ new identity; stale pipe names fail closed and
+  stale sessions are rejected before execution.
+- Evidence-based robustness fix: `open_raw_handle` returned
+  `ConnectTimeout` after a single 50 ms `WaitNamedPipeW` miss on
+  `ERROR_PIPE_BUSY`, ignoring the caller's deadline (reproduced under
+  parallel load in three tests); it now honors the full deadline. No test
+  timeout was loosened.
+- Verified by DACL inspection on a live pipe (current-user-only allow
+  ACEs), nonce/name uniqueness, restart-identity death, and the unchanged
+  protocol/session/frame/ledger/disconnect/timeout suite under repeated
+  full-workspace runs. No mutation, no Applied, `CompositionUnknown`
+  unchanged. See ADR 0034.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

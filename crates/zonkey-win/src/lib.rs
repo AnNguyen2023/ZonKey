@@ -189,6 +189,8 @@ mod native;
 #[cfg(windows)]
 mod native_edit;
 #[cfg(windows)]
+pub(crate) mod pipe_security;
+#[cfg(windows)]
 pub mod pipe_transport;
 #[cfg(windows)]
 mod raw;

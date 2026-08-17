@@ -1,6 +1,6 @@
 #![allow(clippy::doc_markdown)]
 
-//! M3D-20 narrow Windows named-pipe transport binding.
+//! M3D-20/M3D-29 hardened Windows named-pipe transport binding.
 //!
 //! This module binds the platform-neutral transport contract from
 //! `zonkey-service::transport` to a localhost named pipe for Windows 11 x64.
@@ -9,17 +9,27 @@
 //! ambiguous-loss semantics all come from the existing contract; this module
 //! adds only pipe I/O, a bounded read timeout, and clean teardown.
 //!
-//! Security posture, stated exactly: the pipe is created with default
-//! security attributes (the creating process's default DACL), which on a
-//! standard interactive token restricts access to the creating user,
-//! administrators, and local system. No explicit per-user DACL is built, no
-//! client impersonation is performed, and no client identity (PID, window
-//! handle, or pipe name) is trusted. The only binding is the server-issued
-//! session id delivered by the `WELCOME` handshake; it is a correlation
-//! token, not cryptographic authentication. Malformed or oversized frames
-//! fail closed by dropping the connection. A request whose result is lost to
-//! a timeout or disconnect is the caller's `Indeterminate`; re-sending the
-//! same request id replays the recorded outcome without re-execution.
+//! Security posture (M3D-29), stated exactly: every created pipe instance
+//! carries an explicit DACL granting the creating process's user SID full
+//! access and nothing else — the default process DACL is never used, so
+//! other interactive users, `Everyone`, administrators, and `LOCAL SYSTEM`
+//! are denied by omission. A Windows administrator can still take ownership
+//! of the pipe and rewrite the DACL; that is inherent administrative power
+//! and a documented residual threat. `FILE_FLAG_FIRST_PIPE_INSTANCE` makes
+//! creation fail if anything squatted the name first. Immediately after
+//! connect the server impersonates the client at identification level,
+//! compares the client token's user SID with its own, always reverts, and
+//! drops the connection on any failure or mismatch — SID identity
+//! inspection, not cryptographic authentication, and never claimed as such.
+//! PID, window handle, and pipe name alone are never trusted identity.
+//! Session ids and [`generate_pipe_name`] names embed a 128-bit
+//! `BCryptGenRandom` nonce per server lifecycle, so a stale identity never
+//! authorizes a new session. The only binding remains the server-issued
+//! session id delivered by the `WELCOME` handshake, a correlation token.
+//! Malformed or oversized frames fail closed by dropping the connection. A
+//! request whose result is lost to a timeout or disconnect is the caller's
+//! `Indeterminate`; re-sending the same request id replays the recorded
+//! outcome without re-execution.
 //!
 //! This spike never mutates editor text and performs no VS Code `Applied`.
 
@@ -35,11 +45,13 @@ use zonkey_service::transport::{
 };
 
 use windows::Win32::Foundation::{
-    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_PIPE_CONNECTED, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_CREATION_DISPOSITION, FILE_SHARE_MODE,
-    FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_CREATION_DISPOSITION, FILE_FLAG_FIRST_PIPE_INSTANCE,
+    FILE_SHARE_MODE, FlushFileBuffers, PIPE_ACCESS_DUPLEX, READ_CONTROL, ReadFile,
+    SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
 use windows::Win32::System::IO::CancelSynchronousIo;
 use windows::Win32::System::Pipes::{
@@ -54,6 +66,10 @@ use windows::core::{HRESULT, PCWSTR};
 pub enum PipeError {
     /// The pipe did not appear before the connect deadline.
     ConnectTimeout,
+    /// The hardened security boundary could not be established (explicit
+    /// DACL, peer verification inputs, or nonce RNG). No listener was
+    /// created with weaker security.
+    PipeSecurity(String),
     /// The handshake was refused by the server.
     HandshakeRefused(String),
     /// The server reported a protocol id mismatch.
@@ -101,14 +117,39 @@ const HRESULT_PIPE_BUSY: i32 = -2_147_024_755;
 
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn next_session_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0u128, |since| since.as_nanos());
-    format!(
-        "sess-{}-{nanos}",
+fn next_session_id() -> Result<String, PipeError> {
+    // Unpredictable per-lifecycle identity: a 128-bit system-RNG nonce so a
+    // stale session id from a previous lifecycle authorizes nothing.
+    let nonce = crate::pipe_security::random_nonce_hex(16)
+        .map_err(|error| PipeError::PipeSecurity(format!("{error:?}")))?;
+    Ok(format!(
+        "sess-{}-{nonce}",
         SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    ))
+}
+
+/// Generates an unpredictable pipe name for one server lifecycle:
+/// `\\.\pipe\zonkey-<prefix>-<128-bit BCrypt nonce hex>`. Each call yields a
+/// fresh identity; callers must treat the name as opaque.
+///
+/// # Errors
+///
+/// Returns [`PipeError::InvalidPayload`] for an empty prefix or any
+/// character outside ASCII alphanumerics and `-`, and
+/// [`PipeError::PipeSecurity`] when the system RNG is unavailable.
+pub fn generate_pipe_name(prefix: &str) -> Result<String, PipeError> {
+    if prefix.is_empty()
+        || !prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(PipeError::InvalidPayload(
+            "pipe name prefix must be non-empty ASCII alphanumerics or dashes".to_owned(),
+        ));
+    }
+    let nonce = crate::pipe_security::random_nonce_hex(16)
+        .map_err(|error| PipeError::PipeSecurity(format!("{error:?}")))?;
+    Ok(format!(r"\\.\pipe\zonkey-{prefix}-{nonce}"))
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -260,7 +301,11 @@ pub fn spawn_dummy_host_server_with_handoff(
     recovery: Option<Arc<std::sync::Mutex<zonkey_service::transport::RecoveryRegistry>>>,
 ) -> Result<PipeServerHandle, PipeError> {
     let pipe_name = pipe_name.to_owned();
-    let session_id = next_session_id();
+    let session_id = next_session_id()?;
+    // Fail closed before spawning anything if the explicit current-user-only
+    // DACL cannot be built: no listener is ever created with weaker security.
+    let security = crate::pipe_security::PipeSecurityAttributes::current_user_only()
+        .map_err(|error| PipeError::PipeSecurity(format!("{error:?}")))?;
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::channel::<()>();
     let thread_stop = Arc::clone(&stop);
@@ -276,13 +321,13 @@ pub fn spawn_dummy_host_server_with_handoff(
         let handle = unsafe {
             CreateNamedPipeW(
                 PCWSTR(name.as_ptr()),
-                PIPE_ACCESS_DUPLEX,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 1,
                 frame_buffer,
                 frame_buffer,
                 1000,
-                None,
+                Some(security.as_ptr()),
             )
         };
         if handle == INVALID_HANDLE_VALUE {
@@ -291,8 +336,24 @@ pub fn spawn_dummy_host_server_with_handoff(
         }
         let _ = ready_tx.send(());
         loop {
-            if unsafe { ConnectNamedPipe(handle, None) }.is_err() {
-                break;
+            let connected = unsafe { ConnectNamedPipe(handle, None) };
+            if let Err(error) = connected {
+                // ERROR_PIPE_CONNECTED means a client completed the connect
+                // in the window between CreateNamedPipeW and this call; the
+                // instance is connected and must be served, not dropped.
+                if error.code() != HRESULT::from_win32(ERROR_PIPE_CONNECTED.0) {
+                    break;
+                }
+            }
+            // Narrow fail-closed peer trust: the connected client must be the
+            // current user (identification-level impersonation, SID compare,
+            // always revert). Any failure drops the connection unserved.
+            if crate::pipe_security::verify_peer_is_current_user(handle).is_err() {
+                let _ = unsafe { DisconnectNamedPipe(handle) };
+                if thread_stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                continue;
             }
             serve_connection(
                 handle,
@@ -537,12 +598,18 @@ fn open_raw_handle(pipe_name: &str, timeout: Duration) -> Result<HANDLE, PipeErr
         let opened = unsafe {
             CreateFileW(
                 PCWSTR(name.as_ptr()),
+                // READ_CONTROL lets hardened clients and tests inspect the
+                // pipe DACL (query only; it grants no write and no access
+                // to other users).
                 windows::Win32::Foundation::GENERIC_READ.0
-                    | windows::Win32::Foundation::GENERIC_WRITE.0,
+                    | windows::Win32::Foundation::GENERIC_WRITE.0
+                    | READ_CONTROL.0,
                 FILE_SHARE_MODE(0),
                 None,
                 FILE_CREATION_DISPOSITION(3), // OPEN_EXISTING
-                FILE_ATTRIBUTE_NORMAL,
+                // Identification-level SQOS: the server may identify this
+                // client (read its token user SID) but never act as it.
+                FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                 None,
             )
         };
@@ -551,8 +618,12 @@ fn open_raw_handle(pipe_name: &str, timeout: Duration) -> Result<HANDLE, PipeErr
             Err(error) => {
                 let busy = error.code() == HRESULT(HRESULT_PIPE_BUSY);
                 if busy {
-                    let waited = unsafe { WaitNamedPipeW(PCWSTR(name.as_ptr()), 50) };
-                    if !waited.as_bool() {
+                    // A single short wait may miss a listener that is about
+                    // to re-enter ConnectNamedPipe (for example right after
+                    // a restart); keep honoring the caller's deadline
+                    // instead of giving up on the first miss.
+                    let _ = unsafe { WaitNamedPipeW(PCWSTR(name.as_ptr()), 50) };
+                    if Instant::now() >= deadline {
                         return Err(PipeError::ConnectTimeout);
                     }
                     continue;
@@ -1246,6 +1317,106 @@ mod tests {
         );
         let _ = unsafe { CloseHandle(handle) };
         server.shutdown();
+    }
+
+    #[test]
+    fn generated_pipe_names_are_unpredictable_and_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let name = generate_pipe_name("m3d29").expect("generated name");
+            assert!(name.starts_with(r"\\.\pipe\zonkey-m3d29-"), "name={name}");
+            let nonce = name.rsplit('-').next().expect("nonce tail");
+            assert_eq!(nonce.len(), 32, "name={name}");
+            assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(seen.insert(name), "duplicate generated name");
+        }
+        assert!(
+            generate_pipe_name("").is_err(),
+            "empty prefix must be rejected"
+        );
+        assert!(
+            generate_pipe_name("bad prefix!").is_err(),
+            "non-identifier prefix must be rejected"
+        );
+    }
+
+    #[test]
+    fn session_ids_carry_unpredictable_nonces_per_lifecycle() {
+        let (handler, _calls) = counting_handler();
+        let first = spawn("nonce-a", Arc::clone(&handler));
+        let second = spawn("nonce-b", Arc::clone(&handler));
+        assert_ne!(first.session_id, second.session_id);
+        for session in [&first.session_id, &second.session_id] {
+            let nonce = session.rsplit('-').next().expect("nonce tail");
+            assert_eq!(nonce.len(), 32, "session={session}");
+            assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+        first.shutdown();
+        second.shutdown();
+    }
+
+    #[test]
+    fn hardened_pipe_dacl_grants_only_the_current_user() {
+        let (handler, _calls) = counting_handler();
+        let server = spawn("dacl", handler);
+        let client = connect(&server);
+        let handle = client.handle.expect("handle");
+        let facts = crate::pipe_security::inspect_current_user_only_dacl(handle)
+            .expect("inspect server pipe DACL");
+        assert!(facts.ace_count >= 1);
+        assert!(
+            facts.all_allowed_aces_grant_current_user_only,
+            "facts={facts:?}"
+        );
+        assert!(!facts.has_deny_ace);
+        client.close();
+        server.shutdown();
+    }
+
+    #[test]
+    fn restart_with_generated_names_changes_identity_and_old_pipe_dies() {
+        let (handler, calls) = counting_handler();
+        let first_name = generate_pipe_name("m3d29-restart").expect("first name");
+        let first =
+            spawn_dummy_host_server(&first_name, 8, Arc::clone(&handler)).expect("first server");
+        let stale_session = first.session_id.clone();
+        {
+            let mut client = connect(&first);
+            let outcome = client
+                .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+                .expect("first lifecycle works");
+            assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
+            client.close();
+        }
+        first.shutdown();
+        let second_name = generate_pipe_name("m3d29-restart").expect("second name");
+        assert_ne!(first_name, second_name);
+        let second = spawn_dummy_host_server(&second_name, 8, handler).expect("second server");
+        assert_ne!(stale_session, second.session_id);
+        // The old pipe identity is gone: connecting to it fails closed.
+        let stale = PipeClient::connect(&first_name, Duration::from_millis(300));
+        assert!(matches!(stale, Err(PipeError::ConnectTimeout)));
+        // A stale session authorizes nothing on the new lifecycle.
+        let mut client = connect(&second);
+        let handle = client.handle.expect("handle");
+        let error = client
+            .request_on(
+                handle,
+                &stale_session,
+                "req-old",
+                "Inactive",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect_err("stale session rejected");
+        assert_eq!(error, PipeError::SessionMismatch);
+        let outcome = client
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+            .expect("new lifecycle works");
+        assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        client.close();
+        second.shutdown();
     }
 
     #[test]
