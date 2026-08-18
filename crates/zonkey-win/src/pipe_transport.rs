@@ -32,6 +32,20 @@
 //! outcome without re-execution.
 //!
 //! This spike never mutates editor text and performs no VS Code `Applied`.
+//!
+//! Lifecycle model (M3D-34), stated exactly: the transport is an explicit
+//! **single-active-client** endpoint. One pipe instance serves exactly one
+//! connected client at a time; a second concurrent connect receives
+//! `ERROR_PIPE_BUSY`, waits only within the caller's bounded deadline, and
+//! then fails closed (`ConnectTimeout`) — there is no connection queue and
+//! no unbounded growth. Disconnect + reconnect within the same server
+//! lifecycle reuses the same session and replays from the ledger (no fresh
+//! authorization context); a server restart is a new lifecycle with a new
+//! pipe and session identity, and stale sessions reject before execution.
+//! The connection read loop is stop-aware (`PeekNamedPipe`-gated reads with
+//! a stop poll), so shutdown completes deterministically — bounded by the
+//! poll interval plus at most the current handler run — even while a client
+//! is connected or a request is in flight; no thread or handle is leaked.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -56,7 +70,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::IO::CancelSynchronousIo;
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-    PIPE_WAIT, WaitNamedPipeW,
+    PIPE_WAIT, PeekNamedPipe, WaitNamedPipeW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
 use windows::core::{HRESULT, PCWSTR};
@@ -110,7 +124,20 @@ pub fn composition_gate_handler() -> RequestHandler {
 struct SendHandle(HANDLE);
 unsafe impl Send for SendHandle {}
 
+/// Owned duplicate of a reader-thread handle used only for cancellation.
+/// Unlike [`SendHandle`], this wrapper owns its native handle and closes it
+/// as soon as the cancellation path is finished.
+struct CancelHandle(HANDLE);
+unsafe impl Send for CancelHandle {}
+
+impl Drop for CancelHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
 const READ_CHUNK: usize = 4096;
+const SERVE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `HRESULT_FROM_WIN32(ERROR_PIPE_BUSY)` where `ERROR_PIPE_BUSY` is 231.
 const HRESULT_PIPE_BUSY: i32 = -2_147_024_755;
@@ -167,7 +194,8 @@ fn write_frame(handle: HANDLE, payload: &str) -> Result<(), PipeError> {
     write_all(handle, &frame)
 }
 
-/// Blocking chunked read of exactly one frame; used by the server loop.
+/// Blocking chunked read of exactly one frame; used by the client reader
+/// thread, which is cancelled via `CancelSynchronousIo`.
 fn read_frame_blocking(handle: HANDLE, buffer: &mut Vec<u8>) -> Result<Frame, PipeError> {
     loop {
         let mut view: &[u8] = buffer;
@@ -182,6 +210,56 @@ fn read_frame_blocking(handle: HANDLE, buffer: &mut Vec<u8>) -> Result<Frame, Pi
             .map_err(|_| PipeError::ConnectionLost)?;
         if read == 0 {
             return Err(PipeError::ConnectionLost);
+        }
+        buffer.extend_from_slice(&chunk[..read as usize]);
+    }
+}
+
+/// Outcome of one stop-aware server read.
+enum ServeRead {
+    Frame(Frame),
+    Stopped,
+    Closed,
+}
+
+/// Stop-aware bounded read of one frame for the server connection loop.
+/// `PeekNamedPipe` gates every `ReadFile`, so an idle client never blocks
+/// the listener thread; the stop flag is polled between empty peeks, which
+/// bounds shutdown latency to the poll interval plus the current handler
+/// run. Peek/read failures and malformed frames close the connection
+/// fail-closed exactly like the blocking reader did.
+fn read_frame_stop_aware(handle: HANDLE, buffer: &mut Vec<u8>, stop: &AtomicBool) -> ServeRead {
+    loop {
+        let mut view: &[u8] = buffer;
+        match decode_frame(&mut view) {
+            Ok(Some(frame)) => {
+                let consumed = buffer.len() - view.len();
+                buffer.drain(..consumed);
+                return ServeRead::Frame(frame);
+            }
+            Ok(None) => {}
+            Err(_) => return ServeRead::Closed,
+        }
+        let mut available = 0u32;
+        let peeked =
+            unsafe { PeekNamedPipe(handle, None, 0, None, Some(&raw mut available), None) };
+        if peeked.is_err() {
+            return ServeRead::Closed;
+        }
+        if available == 0 {
+            if stop.load(Ordering::Relaxed) {
+                return ServeRead::Stopped;
+            }
+            thread::sleep(SERVE_POLL_INTERVAL);
+            continue;
+        }
+        let want = (available as usize).min(READ_CHUNK);
+        let mut chunk = [0u8; READ_CHUNK];
+        let mut read = 0u32;
+        let read_ok =
+            unsafe { ReadFile(handle, Some(&mut chunk[..want]), Some(&raw mut read), None) };
+        if read_ok.is_err() || read == 0 {
+            return ServeRead::Closed;
         }
         buffer.extend_from_slice(&chunk[..read as usize]);
     }
@@ -362,6 +440,7 @@ pub fn spawn_dummy_host_server_with_handoff(
                 &handler,
                 handoff.as_ref(),
                 recovery.as_ref(),
+                &thread_stop,
             );
             let _ = unsafe { DisconnectNamedPipe(handle) };
             if thread_stop.load(Ordering::Relaxed) {
@@ -388,11 +467,16 @@ fn serve_connection(
     handler: &RequestHandler,
     handoff: Option<&HandoffProvider>,
     recovery: Option<&Arc<std::sync::Mutex<crate::recovery_store::DurableRecoveryStore>>>,
+    stop: &AtomicBool,
 ) {
     let mut buffer: Vec<u8> = Vec::new();
     loop {
-        let Ok(frame) = read_frame_blocking(handle, &mut buffer) else {
-            return;
+        let frame = match read_frame_stop_aware(handle, &mut buffer, stop) {
+            ServeRead::Frame(frame) => frame,
+            // Stopped (server shutdown) and Closed (client gone, malformed
+            // frame) both end the connection deterministically; no blocked
+            // reads, no leaked thread.
+            ServeRead::Stopped | ServeRead::Closed => return,
         };
         let payload = frame.payload.as_str();
         if let Some(protocol) = payload.strip_prefix("HELLO|") {
@@ -878,8 +962,17 @@ impl PipeClient {
     /// refused handshake.
     pub fn connect(pipe_name: &str, connect_timeout: Duration) -> Result<Self, PipeError> {
         let handle = open_raw_handle(pipe_name, connect_timeout)?;
-        write_frame(handle, &format!("HELLO|{TRANSPORT_PROTOCOL_ID}"))?;
-        let reply = read_frame_with_timeout(handle, HANDSHAKE_TIMEOUT)?;
+        if let Err(error) = write_frame(handle, &format!("HELLO|{TRANSPORT_PROTOCOL_ID}")) {
+            let _ = unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+        let reply = match read_frame_with_timeout(handle, HANDSHAKE_TIMEOUT) {
+            Ok(reply) => reply,
+            Err(error) => {
+                let _ = unsafe { CloseHandle(handle) };
+                return Err(error);
+            }
+        };
         if let Some(reason) = reply.payload.strip_prefix("ERROR|") {
             let _ = unsafe { CloseHandle(handle) };
             return Err(match reason {
@@ -1167,7 +1260,7 @@ impl Drop for PipeClient {
 /// `SendHandle` (a raw field access would capture the non-Send `HANDLE`).
 fn run_frame_reader(
     reader: &SendHandle,
-    handle_tx: &mpsc::Sender<SendHandle>,
+    handle_tx: &mpsc::Sender<CancelHandle>,
     result_tx: &mpsc::Sender<Result<Frame, PipeError>>,
 ) {
     let handle = reader.0;
@@ -1184,9 +1277,13 @@ fn run_frame_reader(
         )
     }
     .is_ok();
-    if registered {
-        let _ = handle_tx.send(SendHandle(duplicated));
+    if !registered {
+        // Without a real thread handle the caller could not cancel a
+        // blocking read safely; fail closed before entering ReadFile.
+        let _ = result_tx.send(Err(PipeError::ConnectionLost));
+        return;
     }
+    let _ = handle_tx.send(CancelHandle(duplicated));
     let mut buffer: Vec<u8> = Vec::new();
     let outcome = read_frame_blocking(handle, &mut buffer);
     let message = match outcome {
@@ -1199,25 +1296,25 @@ fn run_frame_reader(
 
 /// Reads one frame with a bounded timeout by cancelling the blocking read.
 fn read_frame_with_timeout(handle: HANDLE, timeout: Duration) -> Result<Frame, PipeError> {
-    let (handle_tx, handle_rx) = mpsc::channel::<SendHandle>();
+    let (handle_tx, handle_rx) = mpsc::channel::<CancelHandle>();
     let (result_tx, result_rx) = mpsc::channel::<Result<Frame, PipeError>>();
     let reader = SendHandle(handle);
-    thread::spawn(move || run_frame_reader(&reader, &handle_tx, &result_tx));
-    let reader_thread = handle_rx
-        .recv_timeout(Duration::from_millis(500))
-        .map(|wrapped| wrapped.0);
-    match result_rx.recv_timeout(timeout) {
+    let reader_join = thread::spawn(move || run_frame_reader(&reader, &handle_tx, &result_tx));
+    let reader_thread = handle_rx.recv_timeout(Duration::from_millis(500)).ok();
+    let result = match result_rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(RecvTimeoutError::Timeout) => {
-            if let Ok(thread_handle) = reader_thread {
-                let _ = unsafe { CancelSynchronousIo(thread_handle) };
+            if let Some(thread_handle) = reader_thread.as_ref() {
+                let _ = unsafe { CancelSynchronousIo(thread_handle.0) };
             }
             // Reap the reader result so the thread finishes deterministically.
             let _ = result_rx.recv_timeout(Duration::from_secs(1));
             Err(PipeError::Timeout)
         }
         Err(RecvTimeoutError::Disconnected) => Err(PipeError::ConnectionLost),
-    }
+    };
+    let _ = reader_join.join();
+    result
 }
 
 #[cfg(test)]
@@ -1995,6 +2092,166 @@ mod tests {
             "outcome={outcome:?}"
         );
         assert_eq!(calls.load(Ordering::Relaxed), 0, "never executed");
+        client.close();
+        server.shutdown();
+    }
+
+    /// Watchdog helper: runs `body` on a worker thread and fails the test
+    /// if it does not finish within `bound` (a hang surfaces as a bounded
+    /// failure instead of a stuck suite).
+    fn bounded<T: Send + 'static>(
+        bound: Duration,
+        label: &str,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done_tx, done_rx) = mpsc::channel::<T>();
+        thread::spawn(move || {
+            let value = body();
+            let _ = done_tx.send(value);
+        });
+        match done_rx.recv_timeout(bound) {
+            Ok(value) => value,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("{label} did not complete within {bound:?}")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("{label} worker vanished before completing")
+            }
+        }
+    }
+
+    #[test]
+    fn shutdown_with_idle_connected_client_completes_bounded() {
+        let (handler, _calls) = counting_handler();
+        let server = spawn("shutdown-idle", handler);
+        let mut client = connect(&server);
+        client
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+            .expect("handshake and one request");
+        // The server is now blocked reading from the idle client; shutdown
+        // must still complete deterministically.
+        bounded(
+            Duration::from_secs(3),
+            "shutdown with idle connected client",
+            move || server.shutdown(),
+        );
+        client.close();
+    }
+
+    #[test]
+    fn shutdown_during_active_request_completes_bounded() {
+        let slow: RequestHandler = Arc::new(|_id, _composition, _canonical| {
+            thread::sleep(Duration::from_millis(750));
+            LedgerOutcome::Definite("applied".to_owned())
+        });
+        let name = pipe_name("shutdown-active");
+        let server = spawn_dummy_host_server(&name, 8, slow).expect("server");
+        let mut client = connect(&server);
+        // Shut down on a worker thread while the main thread fires a slow
+        // request, so shutdown overlaps the active handler and read loop.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            server.shutdown();
+            let _ = done_tx.send(());
+        });
+        thread::sleep(Duration::from_millis(150));
+        let _ = client.request(
+            "req-slow",
+            "Inactive",
+            "{canonical}",
+            Duration::from_secs(5),
+        );
+        match done_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("shutdown during active request did not complete within 5s")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("shutdown worker vanished before completing")
+            }
+        }
+    }
+
+    #[test]
+    fn second_concurrent_client_fails_closed_bounded() {
+        let (handler, calls) = counting_handler();
+        let server = spawn("single-client", handler);
+        let mut first = connect(&server);
+        first
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+            .expect("first client works");
+        // Exactly one active client: while the first holds the single pipe
+        // instance, a second concurrent connect fails closed within the
+        // caller's bounded deadline (no queue, no unbounded wait).
+        let second = PipeClient::connect(&server.pipe_name, Duration::from_millis(750));
+        assert!(
+            matches!(second, Err(PipeError::ConnectTimeout)),
+            "second concurrent client must fail closed"
+        );
+        // The active client is unaffected and keeps its session semantics.
+        let outcome = first
+            .request("req-2", "Inactive", "{canonical}", Duration::from_secs(5))
+            .expect("first client unaffected");
+        assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        first.close();
+        server.shutdown();
+    }
+
+    #[test]
+    fn noisy_client_is_dropped_and_endpoint_recovers() {
+        let (handler, _calls) = counting_handler();
+        let server = spawn("noisy", handler);
+        // A noisy client sends malformed frames: the connection drops
+        // fail-closed without stalling the listener.
+        for _ in 0..5 {
+            let noisy = open_raw_handle(&server.pipe_name, Duration::from_secs(5)).expect("open");
+            write_all(noisy, &[0xFF, 0xFF, 0xFF, 0xFF, 0x00]).expect("junk header");
+            let _ = unsafe { CloseHandle(noisy) };
+        }
+        // A clean client connects immediately afterwards: no starvation.
+        let mut client = connect(&server);
+        let outcome = client
+            .request(
+                "req-clean",
+                "Inactive",
+                "{canonical}",
+                Duration::from_secs(5),
+            )
+            .expect("endpoint recovered");
+        assert_eq!(outcome, LedgerOutcome::Definite("applied".to_owned()));
+        client.close();
+        server.shutdown();
+    }
+
+    #[test]
+    fn repeated_reconnect_loop_keeps_session_and_replay_semantics() {
+        let (handler, calls) = counting_handler();
+        let server = spawn("reconnect-loop", handler);
+        let session = {
+            let mut client = connect(&server);
+            let session = client.session_id().to_owned();
+            client
+                .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+                .expect("first request");
+            client.close();
+            session
+        };
+        // Repeated disconnect + reconnect within the same lifecycle keeps
+        // the same session and never creates a fresh authorization context.
+        for round in 0..10 {
+            let client = connect(&server);
+            assert_eq!(client.session_id(), session, "round {round}");
+            client.close();
+        }
+        // Duplicate replay across reconnects still resolves idempotently.
+        let mut client = connect(&server);
+        assert_eq!(client.session_id(), session);
+        let replay = client
+            .request("req-1", "Inactive", "{canonical}", Duration::from_secs(5))
+            .expect("duplicate replay after reconnects");
+        assert_eq!(replay, LedgerOutcome::Definite("applied".to_owned()));
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "never re-executed");
         client.close();
         server.shutdown();
     }
