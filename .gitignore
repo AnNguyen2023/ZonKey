@@ -2,6 +2,7 @@
 /release/
 /.vscode-test-profile/
 /.vscode-test-extensions/
+/.serena/
 references/cay/
 *.pdb
 *.ilk
