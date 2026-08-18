@@ -312,3 +312,12 @@ User dictionary phải nằm trong profile người dùng, không commit vào Gi
 - Có per-app policy, excluded apps, config backup và reset.
 - Không key stuck, feedback loop hoặc mất text trong integration matrix cốt lõi.
 - Build/release Windows reproducible, source license rõ ràng, binary được ký khi phát hành rộng.
+
+## 13. M3D release checkpoints
+
+- **M3D-37 — DONE:** packaged query/reject operator surface, one-window
+  physical-key smoke, sanitized result display, minimal beta lifecycle pack,
+  deterministic provenance manifest, and clean-profile validation.
+- **M3D-38 — audit only:** query/reject beta release-readiness review from a
+  clean committed Windows 11 x64 HEAD. Real Applied remains disabled until
+  composition evidence is trustworthy.

@@ -1,8 +1,10 @@
 /target/
+/release/
+/.vscode-test-profile/
+/.vscode-test-extensions/
 references/cay/
 *.pdb
 *.ilk
 *.user
 .vs/
 .vscode/
-

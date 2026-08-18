@@ -99,16 +99,67 @@ Package the production VSIX (manifest + README + minified bundle only):
 Start the endpoint explicitly (manual, approved model; no service, no
 auto-start):
 
-    zonkey-cli.exe serve-host-validation --pipe auto --max-seconds <n>
+    zonkey-cli.exe handoff-live --pipe auto
 
-`--pipe auto` generates the per-lifecycle nonce pipe, prints
-`endpoint_pipe=...`, and writes the current-user discovery record at
-`%LOCALAPPDATA%\ZonKey\endpoint.txt`; clean shutdown removes it (a crash
-leaves a stale record that fails closed on connect). Install the VSIX into
-VS Code; the extension connects once at activation and offers
-"Zonkey spike: connect to discovered endpoint" for explicit reconnect.
+`--pipe auto` generates the per-lifecycle nonce pipe and writes the
+current-user discovery record at `%LOCALAPPDATA%\ZonKey\endpoint.txt`.
+The CLI prints only a sanitized readiness/protocol line; the extension reads
+the pipe identity from the protected discovery record. Install the VSIX into
+VS Code; it connects once at activation and offers **Zonkey spike: connect to
+discovered endpoint** for explicit reconnect.
+
+## Packaged query/reject command (M3D-37)
+
+Open one ordinary local `file:` document with a single caret immediately after
+the current rendered candidate, then run **Zonkey spike: check current
+handoff**. The command queries the live `RestorePlanHandoff`, captures the
+real host snapshot, sends the request over the discovered pipe, and displays
+only a sanitized result. The expected real-host result is
+`Rejected(CompositionUnknown)`; document text and version must remain
+unchanged. A missing/mismatched candidate is refused before transport.
+
+The observer is observe-only: it never inserts or replaces document text.
+For the manual command, the active ordinary local document must already contain
+the rendered candidate immediately before the caret. The one-window runner
+creates its local host fixture only after it observes the current live handoff;
+the packaged command queries that handoff again, so no stale handoff is frozen
+or fabricated. Scripted input is tooling validation, not live evidence.
+
+### One-window packaged physical smoke
+
+Build the release CLI first, then run this one command from
+`hosts/vscode-spike`:
+
+    npm run smoke:m3d37
+
+The runner starts the real `handoff-live` endpoint, installs the packaged VSIX
+into a temporary isolated profile, and opens one VS Code window with one local
+file editor. The installed VSIX owns the only endpoint client. Type only on the
+physical keyboard when the window says it is ready:
+
+1. `dungf` then **Space**.
+2. `resume` then **Space**.
+3. Stop typing immediately.
+
+The harness observes the live `WH_KEYBOARD_LL` handoff, automatically invokes
+**Zonkey spike: check current handoff**, and verifies
+`Rejected(CompositionUnknown)` plus unchanged target document text/version.
+No `SendInput`, scripted feed, `TextEditor.edit`, or second VS Code window is
+used. The temporary endpoint, profile, workspace, and VSIX installation are
+removed automatically.
+
+Shutdown: stop `zonkey-cli.exe` with Ctrl+C. A hard crash leaves a stale
+discovery record that fails closed; starting a new endpoint replaces it.
+Uninstall the VSIX from VS Code Extensions, stop the CLI, and remove the
+stale `%LOCALAPPDATA%\ZonKey\endpoint.txt` only after the endpoint is stopped.
+Preserve `recovery-state.bin` unless intentionally resetting recovery state.
 The endpoint protocol is `zonkey.host-transport/1`; unknown protocols and
 unknown discovery/state schemas fail closed.
+
+Known limitations: Windows 11 x64 only, manual startup, one active pipe
+client, no service/auto-start, no installer, no automatic reconnect, and real
+Applied remains disabled while composition is Unknown. The smallest beta
+bundle is produced by `npm run beta:package` after a clean release build.
 
 Clean-profile end-to-end validation (installs the VSIX into an isolated
 VS Code profile and validates discovery, reconnect, recovery, restart

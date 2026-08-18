@@ -18,6 +18,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as vscode from "vscode";
 import { ENDPOINT_PROTOCOL } from "../src/endpoint.ts";
+import { VsCodeHostAdapter, requestFromSnapshot } from "../src/adapter.ts";
+import { canonicalJson } from "../src/contract.ts";
+import { createRealBinding } from "../src/vscode-binding.ts";
 
 const EXTENSION_ID = "zonkey-spike.zonkey-vscode-spike";
 const CLI = process.env.ZONKEY_CLI_RELEASE ?? "";
@@ -80,9 +83,13 @@ function readDiscoveryPipe(): string | undefined {
   return readDiscoveryEndpoint()?.pipe;
 }
 
-function startEndpoint(): Promise<EndpointHandle> {
+function startEndpoint(handoffToken?: string): Promise<EndpointHandle> {
   assert.ok(CLI.length > 0, "ZONKEY_CLI_RELEASE must point at the release zonkey-cli.exe");
-  const child = spawn(CLI, ["serve-host-validation", "--pipe", "auto", "--max-seconds", "600"], {
+  const args = ["serve-host-validation", "--pipe", "auto", "--max-seconds", "600"];
+  if (handoffToken !== undefined) {
+    args.push("--handoff-token", handoffToken);
+  }
+  const child = spawn(CLI, args, {
     stdio: ["ignore", "pipe", "pipe"],
   });
   // The discovery record is the authenticated source for the endpoint
@@ -138,6 +145,11 @@ async function runChecks(): Promise<void> {
   }
   assert.ok(extension.isActive, "VSIX extension must activate in the clean profile");
   const api = extension.exports as ExtensionApi;
+  const commands = await vscode.commands.getCommands(true);
+  assert.ok(
+    commands.includes("zonkeySpike.checkCurrentHandoff"),
+    "installed VSIX must register the packaged handoff command",
+  );
 
   // 2. Start the approved endpoint; the extension's activation-time
   //    discovery may have run before it existed, so use the explicit
@@ -156,6 +168,10 @@ async function runChecks(): Promise<void> {
   // 3. Live query/recovery paths operate through the discovered client.
   const client = api.endpointState.client;
   assert.ok(client !== undefined, "discovered client must be available");
+  assert.equal(
+    await vscode.commands.executeCommand("zonkeySpike.checkCurrentHandoff"),
+    "CurrentHandoffUnavailable",
+  );
   assert.equal(await client.recoveryCommand("LIST", 10_000), "recovery-list|0");
 
   // 4. Final host behavior: a real request still fails closed.
@@ -166,6 +182,51 @@ async function runChecks(): Promise<void> {
     10_000,
   );
   assert.equal(outcome, "DEFINITE|rejected:CompositionUnknown");
+
+  // M3D-37 packaged-command tooling check: the endpoint supplies a scripted
+  // handoff only to prove that the installed VSIX command uses the real
+  // discovery client, host snapshot, and request path. This is not physical
+  // keyboard evidence; the owner smoke remains the live proof.
+  const commandEndpoint = await startEndpoint("resume");
+  await vscode.commands.executeCommand("zonkeySpike.endpointConnect");
+  await waitFor(
+    () => (api.endpointState.last.status === "connected" ? true : undefined),
+    10_000,
+    "packaged command endpoint connect",
+  );
+  const commandFolders = vscode.workspace.workspaceFolders;
+  assert.ok(commandFolders !== undefined && commandFolders.length === 1, "no workspace folder");
+  const commandUri = vscode.Uri.joinPath(commandFolders[0].uri, "m3d37-command-probe.txt");
+  const commandContent = "hello réume end\n";
+  await vscode.workspace.fs.writeFile(commandUri, new TextEncoder().encode(commandContent));
+  const commandDocument = await vscode.workspace.openTextDocument(commandUri);
+  const commandEditor = await vscode.window.showTextDocument(commandDocument, { preview: false });
+  const commandCaret = commandDocument.positionAt(commandContent.indexOf("réume") + "réume".length);
+  commandEditor.selection = new vscode.Selection(commandCaret, commandCaret);
+  const commandBefore = commandDocument.getText();
+  const commandVersion = commandDocument.version;
+  assert.equal(
+    await vscode.commands.executeCommand("zonkeySpike.checkCurrentHandoff"),
+    "Rejected(CompositionUnknown)",
+  );
+  assert.equal(commandDocument.getText(), commandBefore);
+  assert.equal(commandDocument.version, commandVersion);
+  const commandBinding = createRealBinding();
+  const commandAdapter = new VsCodeHostAdapter(commandBinding);
+  const commandSnapshot = commandAdapter.captureSnapshot({
+    expected_text: "réume",
+    replacement: "resume",
+  });
+  assert.ok(commandSnapshot.ok, "packaged command snapshot must be capturable");
+  const commandCanonical = canonicalJson(
+    requestFromSnapshot(commandSnapshot.snapshot, "handoff-1"),
+  );
+  assert.equal(
+    await api.endpointState.client!.request("handoff-1", "Unknown", commandCanonical, 10_000),
+    "DEFINITE|rejected:CompositionUnknown",
+  );
+  await commandEndpoint.kill();
+  console.log("M3D37_PACKAGED_COMMAND_TOOLING_OK");
 
   // 5. Duplicate endpoint startup: a second lifecycle becomes the
   //    discovered endpoint; shutting the older one down must not
