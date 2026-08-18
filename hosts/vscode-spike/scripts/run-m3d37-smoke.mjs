@@ -25,14 +25,12 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const extensionRoot = join(here, "..");
 const repoRoot = join(extensionRoot, "..", "..");
-const cliPath = join(
-  repoRoot,
-  "target",
-  "x86_64-pc-windows-msvc",
-  "release",
-  "zonkey-cli.exe",
-);
-const vsixPath = join(extensionRoot, "zonkey-vscode-spike-0.0.1.vsix");
+const cliPath =
+  process.env.ZONKEY_M3D37_CLI_PATH ??
+  join(repoRoot, "target", "x86_64-pc-windows-msvc", "release", "zonkey-cli.exe");
+const vsixPath =
+  process.env.ZONKEY_M3D37_VSIX_PATH ??
+  join(extensionRoot, "zonkey-vscode-spike-0.0.1.vsix");
 const entryPath = join(extensionRoot, "out", "m3d37-physical-smoke.cjs");
 const waitSeconds = Number(process.env.ZONKEY_M3D37_WAIT_SECONDS ?? "300");
 
@@ -104,6 +102,21 @@ writeFileSync(
 );
 
 let endpoint;
+let failed = false;
+
+function failureKind(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("live endpoint discovery")) return "ENDPOINT_STARTUP";
+  if (message.includes("live RestorePlanHandoff")) return "HANDOFF_TIMEOUT";
+  if (message.includes("packaged command") || message.includes("not registered")) {
+    return "PACKAGED_COMMAND_UNAVAILABLE";
+  }
+  if (message.includes("document text") || message.includes("document version")) {
+    return "DOCUMENT_CHANGED";
+  }
+  if (message.includes("unexpected packaged command result")) return "UNEXPECTED_RESULT";
+  return "RUNNER_FAILURE";
+}
 async function stopEndpoint() {
   if (endpoint === undefined) return;
   if (endpoint.pid !== undefined) {
@@ -153,6 +166,9 @@ try {
     ],
   });
   console.log("M3D37_ONE_WINDOW_SMOKE_OK");
+} catch (error) {
+  failed = true;
+  console.error(`M3D37_FAILURE kind=${failureKind(error)}`);
 } finally {
   await stopEndpoint();
   if (process.env.ZONKEY_KEEP_PROFILE !== "1") {
@@ -165,3 +181,4 @@ try {
     console.log(`KEEP profile=${profileDir} exts=${extensionsDir} discovery=${discoveryDir}`);
   }
 }
+if (failed) process.exitCode = 1;

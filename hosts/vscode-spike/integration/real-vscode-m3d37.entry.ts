@@ -46,7 +46,22 @@ function handoffFixture(payload: string): { renderedToken: string } {
   return { renderedToken: parsed.handoff.renderedToken };
 }
 
-export async function run(): Promise<void> {
+function failureKind(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("live RestorePlanHandoff") || message.includes("timeout waiting")) {
+    return "HANDOFF_TIMEOUT";
+  }
+  if (message.includes("packaged command") || message.includes("not registered")) {
+    return "PACKAGED_COMMAND_UNAVAILABLE";
+  }
+  if (message.includes("document text") || message.includes("document version")) {
+    return "DOCUMENT_CHANGED";
+  }
+  if (message.includes("unexpected packaged command result")) return "UNEXPECTED_RESULT";
+  return "RUNNER_FAILURE";
+}
+
+async function runInner(): Promise<void> {
   const extension = vscode.extensions.getExtension(EXTENSION_ID);
   assert.ok(extension !== undefined, "packaged VSIX is not installed");
   await waitFor(() => (extension.isActive ? true : undefined), 60_000, "VSIX activation");
@@ -73,6 +88,7 @@ export async function run(): Promise<void> {
     "ZonKey ready: type dungf + Space, then resume + Space, then stop typing.",
   );
 
+  let noCurrentHandoffObserved = false;
   const handoff = await waitFor(
     async () => {
       if (api.endpointState.last.status !== "connected" || api.endpointState.client === undefined) {
@@ -80,12 +96,20 @@ export async function run(): Promise<void> {
       }
       const payload = await api.endpointState.client.handoffQuery(10_000);
       const parsed = parseHandoffPayload(payload);
+      if (parsed.kind === "none") {
+        if (!noCurrentHandoffObserved) {
+          noCurrentHandoffObserved = true;
+          console.log("M3D37 NO_CURRENT_HANDOFF_OBSERVED");
+        }
+        return undefined;
+      }
       if (parsed.kind === "current") return payload;
       return undefined;
     },
     Number(process.env.ZONKEY_M3D37_WAIT_SECONDS ?? "300") * 1000,
     "live RestorePlanHandoff",
   );
+  assert.ok(noCurrentHandoffObserved, "negative/no-current handoff state was not observed");
   terminal.dispose();
   console.log("M3D37 LIVE_HANDOFF_OBSERVED");
 
@@ -107,10 +131,19 @@ export async function run(): Promise<void> {
   const result = await vscode.commands.executeCommand<string>(
     "zonkeySpike.checkCurrentHandoff",
   );
-  assert.equal(result, "Rejected(CompositionUnknown)");
-  assert.equal(targetDocument.getText(), beforeText);
-  assert.equal(targetDocument.version, beforeVersion);
+  assert.equal(result, "Rejected(CompositionUnknown)", "unexpected packaged command result");
+  assert.equal(targetDocument.getText(), beforeText, "document text changed");
+  assert.equal(targetDocument.version, beforeVersion, "document version changed");
   console.log("M3D37_PACKAGED_COMMAND_OK");
   console.log("M3D37_DOCUMENT_UNCHANGED_OK");
   vscode.window.showInformationMessage("ZonKey M3D-37 physical smoke passed");
+}
+
+export async function run(): Promise<void> {
+  try {
+    await runInner();
+  } catch (error) {
+    console.error(`M3D37_FAILURE kind=${failureKind(error)}`);
+    throw error;
+  }
 }
