@@ -945,6 +945,39 @@ rather than wrapping or reusing identity.
   real-VSCode E2Es pass (validation, transport, handoff, recovery);
   handoff-live remains owner-manual (needs live typing). See ADR 0037.
 
+#### M3D-33 - Startup / packaging / VSIX release-path spike - DONE
+
+- Release artifacts: exactly one runtime executable,
+  `target/x86_64-pc-windows-msvc/release/zonkey-cli.exe` (~584 KB); all
+  other workspace members are libraries; no 32-bit artifacts.
+- VSIX: `npm run package` produces `zonkey-vscode-spike-0.0.1.vsix`
+  (5 files, ~9 KB — manifest + README + minified `out/extension.cjs`
+  only) via `.vscodeignore` allow-list; manifest pins version 0.0.1,
+  `engines.vscode ^1.90.0`, activation `onStartupFinished`, and documents
+  protocol compatibility (`zonkey.host-transport/1`, recovery-state v2);
+  `*.vsix` gitignored; dependencies/lockfile untouched.
+- Startup model (explicit, manual): `zonkey-cli serve-host-validation
+  --pipe auto` generates the per-lifecycle nonce pipe (M3D-29), prints
+  `endpoint_pipe=…`, and writes `%LOCALAPPDATA%\ZonKey\endpoint.txt`
+  (protocol/pipe/pid/started; current-user-only ACL via durable replace).
+  Clean shutdown removes the record only when it still names this
+  endpoint; crashes leave stale records that fail closed on connect
+  (nonce identity never authorizes across lifecycles); duplicate startups
+  are last-writer-wins. Extension connects once at activation and offers
+  an explicit reconnect command; `ZONKEY_ENDPOINT_DIR` isolates profiles.
+  No service/auto-start/background persistence added.
+- Clean-profile validation (real VS Code, `npm run test:endpoint`): VSIX
+  installed into isolated user-data/extensions dirs; installed extension
+  activates; discovery + reconnect + recovery LIST + a real request
+  (`rejected:CompositionUnknown`, document text/version unchanged);
+  duplicate-endpoint semantics; stale identity and unknown-protocol
+  records fail closed; restart yields a new pipe/session. Validation
+  found and fixed three real defects (CLI rejecting `--pipe auto`,
+  missing activation exports, unreliable Node kill on Windows).
+- Gates: Rust fmt/clippy/239 tests/release+msvc builds; npm 43/43 +
+  typecheck; real `M3D28_RECOVERY_VALIDATION_OK` regression;
+  `M3D33_ENDPOINT_PROFILE_OK` + `M3D33_CLEAN_PROFILE_OK`. See ADR 0038.
+
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 
 - Validate bounded current-plan ownership and deterministic invalidation.

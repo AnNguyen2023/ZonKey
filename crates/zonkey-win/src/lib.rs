@@ -185,6 +185,8 @@ fn map_key(virtual_key: u32) -> Option<ObservedKey> {
 }
 
 #[cfg(windows)]
+pub mod endpoint_discovery;
+#[cfg(windows)]
 mod native;
 #[cfg(windows)]
 mod native_edit;
@@ -230,6 +232,7 @@ pub fn run_serve_host_validation(
     max_seconds: Option<u64>,
     handoff_token: Option<&str>,
 ) -> Result<(), String> {
+    let (pipe_name, discovery) = resolve_endpoint_pipe(pipe_name)?;
     let handoff = match handoff_token {
         Some(token) => {
             if token.is_empty() || !token.chars().all(|c| c.is_ascii_alphabetic()) {
@@ -259,7 +262,7 @@ pub fn run_serve_host_validation(
         None => None,
     };
     let server = pipe_transport::spawn_dummy_host_server_with_handoff(
-        pipe_name,
+        &pipe_name,
         256,
         pipe_transport::composition_gate_handler(),
         handoff,
@@ -280,7 +283,42 @@ pub fn run_serve_host_validation(
         let _ = shutdown.recv();
     }
     server.shutdown();
+    if discovery {
+        let _ = endpoint_discovery::remove_record(&pipe_name);
+    }
     Ok(())
+}
+
+/// Resolves the requested pipe name for an endpoint run. `auto` generates
+/// the per-lifecycle nonce name (M3D-29) and registers the current-user
+/// discovery record; any other name is used verbatim without touching
+/// discovery (explicit manual mode).
+#[cfg(windows)]
+fn resolve_endpoint_pipe(requested: &str) -> Result<(String, bool), String> {
+    if requested != "auto" {
+        if !requested.starts_with(r"\\.\pipe\") {
+            return Err("pipe name must be a local named pipe path".to_owned());
+        }
+        return Ok((requested.to_owned(), false));
+    }
+    let generated = pipe_transport::generate_pipe_name("svc")
+        .map_err(|error| format!("pipe name generation failed: {error:?}"))?;
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
+    let record = endpoint_discovery::EndpointRecord {
+        protocol: endpoint_discovery::ENDPOINT_PROTOCOL.to_owned(),
+        pipe: generated.clone(),
+        pid: std::process::id(),
+        started_unix_ms: started,
+    };
+    if !endpoint_discovery::write_record(&record) {
+        return Err("endpoint discovery record could not be written".to_owned());
+    }
+    println!("endpoint_pipe={generated}");
+    Ok((generated, true))
 }
 
 /// Runs the M3D-23 live observer → handoff → transport endpoint. The real
@@ -294,6 +332,7 @@ pub fn run_serve_host_validation(
 /// observer fails.
 #[cfg(windows)]
 pub fn run_handoff_live(pipe_name: &str) -> Result<(), String> {
+    let (pipe_name, discovery) = resolve_endpoint_pipe(pipe_name)?;
     let state = std::sync::Arc::new(zonkey_service::transport::SharedDecisionState::new());
     let provider_state = std::sync::Arc::clone(&state);
     let provider: pipe_transport::HandoffProvider = std::sync::Arc::new(move || {
@@ -302,7 +341,7 @@ pub fn run_handoff_live(pipe_name: &str) -> Result<(), String> {
             .map_err(|error| pipe_transport::HandoffRequestWireError(format!("{error:?}")))
     });
     let server = pipe_transport::spawn_dummy_host_server_with_handoff(
-        pipe_name,
+        &pipe_name,
         256,
         pipe_transport::composition_gate_handler(),
         Some(provider),
@@ -317,6 +356,9 @@ pub fn run_handoff_live(pipe_name: &str) -> Result<(), String> {
     let processor = zonkey_service::transport::SharedDecisionProcessor::new(state);
     let observe = native::run_observe_with_processor(processor);
     server.shutdown();
+    if discovery {
+        let _ = endpoint_discovery::remove_record(&pipe_name);
+    }
     observe.map_err(std::string::ToString::to_string)
 }
 

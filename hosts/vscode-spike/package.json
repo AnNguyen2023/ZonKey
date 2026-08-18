@@ -10,12 +10,26 @@
     "vscode": "^1.90.0"
   },
   "main": "./out/extension.cjs",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "zonkey": {
+    "endpointProtocol": "zonkey.host-transport/1",
+    "stateFormat": "recovery-state v2"
+  },
   "contributes": {
     "commands": [
       {
         "command": "zonkeySpike.probe",
         "title": "Zonkey spike: probe cooperating-host apply"
+      },
+      {
+        "command": "zonkeySpike.endpointStatus",
+        "title": "Zonkey spike: endpoint status"
+      },
+      {
+        "command": "zonkeySpike.endpointConnect",
+        "title": "Zonkey spike: connect to discovered endpoint"
       }
     ]
   },
@@ -35,7 +49,11 @@
     "probe:handoff-live": "node scripts/handoff-live-probe.mjs",
     "smoke:m3d23": "npm run compile:handoff-live && node scripts/run-m3d23-smoke.mjs",
     "smoke:m3d23-tooling": "npm run compile:handoff-live && node scripts/run-m3d23-smoke.mjs --scripted-tooling-check",
-    "test:handoff-live": "npm run compile:handoff-live && node scripts/run-handoff-live-integration.mjs"
+    "test:handoff-live": "npm run compile:handoff-live && node scripts/run-handoff-live-integration.mjs",
+    "compile:prod": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --minify --outfile=out/extension.cjs",
+    "package": "npm run compile:prod && vsce package --no-dependencies",
+    "test:endpoint": "npm run compile:endpoint && node scripts/run-clean-profile.mjs",
+    "compile:endpoint": "esbuild integration/real-vscode-endpoint.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/endpoint-profile-validation.cjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

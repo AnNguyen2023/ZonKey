@@ -56,8 +56,12 @@ export class NamedPipeClient {
   private receiveBuffer: Buffer = Buffer.alloc(0);
   private pending: Array<(payload: string | null) => void> = [];
   private closed = false;
-  private constructor(socket: net.Socket, private session: string) {
+  private session: string;
+  // No TypeScript parameter properties: node --test loads this module in
+  // strip-only mode, which rejects them.
+  private constructor(socket: net.Socket, session: string) {
     this.socket = socket;
+    this.session = session;
     socket.on("data", (chunk: Buffer) => {
       this.receiveBuffer = Buffer.concat([this.receiveBuffer, chunk]);
       try {

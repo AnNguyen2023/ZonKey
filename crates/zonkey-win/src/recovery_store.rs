@@ -116,7 +116,7 @@ fn ensure_directory(directory: &Path) -> bool {
 }
 
 /// Durable replace flow: ACL'd temp write → flush → write-through replace.
-fn durable_write(path: &Path, bytes: &[u8]) -> bool {
+pub(crate) fn durable_write_user_only(path: &Path, bytes: &[u8]) -> bool {
     let Ok(security) = crate::pipe_security::PipeSecurityAttributes::current_user_only() else {
         return false;
     };
@@ -196,7 +196,7 @@ impl DurableRecoveryStore {
                     poison: None,
                 };
                 match recovery_codec::encode(&salt, &[]) {
-                    Ok(bytes) if durable_write(&path, &bytes) => {}
+                    Ok(bytes) if durable_write_user_only(&path, &bytes) => {}
                     _ => store.poison = Some(RecoveryStoreError::Unavailable),
                 }
                 store
@@ -311,7 +311,7 @@ impl DurableRecoveryStore {
         let Ok(bytes) = recovery_codec::encode(&salt, &records) else {
             return Err(RecoveryStoreError::WriteFailed);
         };
-        if !durable_write(&self.state_path(), &bytes) {
+        if !durable_write_user_only(&self.state_path(), &bytes) {
             return Err(RecoveryStoreError::WriteFailed);
         }
         self.registry = next_registry;

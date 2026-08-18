@@ -122,8 +122,8 @@ fn run_recovery_command(arguments: &[String]) -> Result<(), String> {
         }
     }
     let pipe_name = pipe_name.ok_or("pipe name is required")?;
-    if !pipe_name.starts_with(r"\\.\pipe\") {
-        return Err("pipe name must be a local named pipe path".to_owned());
+    if pipe_name != "auto" && !pipe_name.starts_with(r"\\.\pipe\") {
+        return Err("pipe name must be a local named pipe path or auto".to_owned());
     }
     let command = match rest.as_slice() {
         ["list"] => "LIST".to_owned(),
@@ -188,8 +188,8 @@ fn parse_serve_args(
         }
     }
     let pipe_name = pipe_name.ok_or("pipe name is required")?;
-    if !pipe_name.starts_with(r"\\.\pipe\") {
-        return Err("pipe name must be a local named pipe path");
+    if pipe_name != "auto" && !pipe_name.starts_with(r"\\.\pipe\") {
+        return Err("pipe name must be a local named pipe path or auto");
     }
     Ok((pipe_name, max_seconds, handoff_token))
 }

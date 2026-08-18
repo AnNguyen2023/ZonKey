@@ -1,0 +1,7 @@
+# M3D-33 VSIX packaging: ship only the production extension bundle and
+# manifest. Everything else — sources, tests, integration entries, scripts,
+# tooling downloads, and non-production build outputs — is excluded.
+**
+!out/extension.cjs
+!package.json
+!README.md

@@ -84,3 +84,34 @@ spike pipe serves one connection at a time.
 - No SendInput, no Win32 mutation, no clipboard, no suppression/replay, no
   multi-host support.
 - The in-session request ledger is unbounded (spike grade).
+
+## Packaging and startup (M3D-33)
+
+Build the release endpoint binary (Windows 11 x64, msvc only):
+
+    cargo build --release -p zonkey-cli --target x86_64-pc-windows-msvc
+    # runtime artifact: target/x86_64-pc-windows-msvc/release/zonkey-cli.exe
+
+Package the production VSIX (manifest + README + minified bundle only):
+
+    npm run package          # -> zonkey-vscode-spike-0.0.1.vsix
+
+Start the endpoint explicitly (manual, approved model; no service, no
+auto-start):
+
+    zonkey-cli.exe serve-host-validation --pipe auto --max-seconds <n>
+
+`--pipe auto` generates the per-lifecycle nonce pipe, prints
+`endpoint_pipe=...`, and writes the current-user discovery record at
+`%LOCALAPPDATA%\ZonKey\endpoint.txt`; clean shutdown removes it (a crash
+leaves a stale record that fails closed on connect). Install the VSIX into
+VS Code; the extension connects once at activation and offers
+"Zonkey spike: connect to discovered endpoint" for explicit reconnect.
+The endpoint protocol is `zonkey.host-transport/1`; unknown protocols and
+unknown discovery/state schemas fail closed.
+
+Clean-profile end-to-end validation (installs the VSIX into an isolated
+VS Code profile and validates discovery, reconnect, recovery, restart
+identity, and fail-closed behavior):
+
+    npm run test:endpoint    # prints M3D33_CLEAN_PROFILE_OK on success
