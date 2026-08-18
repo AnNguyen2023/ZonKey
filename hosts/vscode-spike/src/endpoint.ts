@@ -86,6 +86,20 @@ export type EndpointState =
   | { status: "connect-failed"; pipe: string }
   | { status: "connected"; pipe: string; session: string };
 
+/** Returns the production-safe operator label for an endpoint state. */
+export function describeEndpointState(state: EndpointState): string {
+  switch (state.status) {
+    case "connected":
+      return "connected";
+    case "connect-failed":
+      return "endpoint record found but connection failed";
+    case "no-record":
+      return "no endpoint discovery record";
+    case "disabled":
+      return "disabled";
+  }
+}
+
 /**
  * Reads the discovery record and connects once. No watchers, no retry
  * loops: reconnection is an explicit operator action (reconnect within a

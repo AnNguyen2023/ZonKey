@@ -7,7 +7,12 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ENDPOINT_PROTOCOL, parseRecord, readRecord } from "../src/endpoint.ts";
+import {
+  ENDPOINT_PROTOCOL,
+  describeEndpointState,
+  parseRecord,
+  readRecord,
+} from "../src/endpoint.ts";
 
 const SAMPLE_PIPE = "\\\\.\\pipe\\zonkey-svc-0123456789abcdef";
 
@@ -56,4 +61,18 @@ test("readRecord reads and missing files return none", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("endpoint diagnostics omit pipe and session identities", () => {
+  const connected = describeEndpointState({
+    status: "connected",
+    pipe: SAMPLE_PIPE,
+    session: "sess-secret-session",
+  });
+  const failed = describeEndpointState({ status: "connect-failed", pipe: SAMPLE_PIPE });
+  assert.equal(connected, "connected");
+  assert.equal(failed, "endpoint record found but connection failed");
+  assert.ok(!connected.includes(SAMPLE_PIPE));
+  assert.ok(!connected.includes("sess-secret-session"));
+  assert.ok(!failed.includes(SAMPLE_PIPE));
 });

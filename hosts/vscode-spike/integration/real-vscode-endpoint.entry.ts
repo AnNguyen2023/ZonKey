@@ -50,16 +50,25 @@ async function waitFor<T>(
   }
 }
 
-function readDiscoveryPipe(): string | undefined {
+function readDiscoveryEndpoint(): { pipe: string; pid: number } | undefined {
   try {
     const text = readFileSync(join(DISCOVERY_DIR, "endpoint.txt"), "utf8");
+    let pipe: string | undefined;
+    let pid: number | undefined;
     for (const line of text.split(/\r?\n/)) {
       if (line.startsWith("protocol=") && line.slice("protocol=".length) !== ENDPOINT_PROTOCOL) {
         return undefined;
       }
       if (line.startsWith("pipe=")) {
-        return line.slice("pipe=".length);
+        pipe = line.slice("pipe=".length);
       }
+      if (line.startsWith("pid=")) {
+        const parsed = Number(line.slice("pid=".length));
+        pid = Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+      }
+    }
+    if (pipe !== undefined && pid !== undefined) {
+      return { pipe, pid };
     }
   } catch {
     return undefined;
@@ -67,31 +76,28 @@ function readDiscoveryPipe(): string | undefined {
   return undefined;
 }
 
+function readDiscoveryPipe(): string | undefined {
+  return readDiscoveryEndpoint()?.pipe;
+}
+
 function startEndpoint(): Promise<EndpointHandle> {
   assert.ok(CLI.length > 0, "ZONKEY_CLI_RELEASE must point at the release zonkey-cli.exe");
   const child = spawn(CLI, ["serve-host-validation", "--pipe", "auto", "--max-seconds", "600"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
-  let output = "";
-  child.stdout.on("data", (chunk: Buffer) => {
-    output += chunk.toString("utf8");
-  });
-  child.stderr.on("data", (chunk: Buffer) => {
-    output += chunk.toString("utf8");
-  });
-  // The pipe identity comes from this child's own stdout (a per-lifecycle
-  // nonce); the shared discovery file may still hold a previous endpoint's
-  // record, so wait until it names THIS endpoint.
-  const ownPipe = waitFor(() => {
-    const match = /endpoint_pipe=(\S+)/.exec(output);
-    return match === null ? undefined : match[1];
-  }, 10_000, "endpoint stdout pipe name");
-  return ownPipe.then((pipe) =>
-    waitFor(
-      () => (readDiscoveryPipe() === pipe ? pipe : undefined),
-      10_000,
-      "discovery record naming this endpoint",
-    ).then(() => ({
+  // The discovery record is the authenticated source for the endpoint
+  // identity. Do not retain or print the CLI's stdout/stderr, which may
+  // contain pipe names or future operator diagnostics.
+  child.stdout.on("data", () => {});
+  child.stderr.on("data", () => {});
+  return waitFor(
+    () => {
+      const record = readDiscoveryEndpoint();
+      return record !== undefined && record.pid === child.pid ? record.pipe : undefined;
+    },
+    10_000,
+    "endpoint discovery record for this process",
+  ).then((pipe) => ({
       pipe,
       kill: async () => {
         // Node's kill() does not reliably terminate the CLI on Windows;
@@ -103,8 +109,7 @@ function startEndpoint(): Promise<EndpointHandle> {
         }
         await waitFor(() => (child.exitCode !== null ? true : undefined), 10_000, "endpoint exit");
       },
-    })),
-  );
+    }));
 }
 
 interface ExtensionApi {

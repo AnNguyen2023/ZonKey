@@ -304,14 +304,19 @@ impl EventProcessor for DiagnosticProcessor {
             InjectionOrigin::PhysicalOrUnmarked | InjectionOrigin::Unknown => "no",
             InjectionOrigin::MarkedInjected | InjectionOrigin::LowerIntegrityInjected => "yes",
         };
-        let key = event
-            .key
-            .letter_value()
-            .map(|value| value.to_string())
-            .or_else(|| event.key.digit_value().map(|value| value.to_string()))
-            .or_else(|| event.key.punctuation_value().map(|value| value.to_string()))
-            .or_else(|| event.key.modifier_value().map(|_| "modifier".to_owned()))
-            .unwrap_or_else(|| "other".to_owned());
+        // Category only: never print the actual key, which would be a raw
+        // keystroke/document-content diagnostic.
+        let key = if event.key.letter_value().is_some() {
+            "letter"
+        } else if event.key.digit_value().is_some() {
+            "digit"
+        } else if event.key.punctuation_value().is_some() {
+            "punctuation"
+        } else if event.key.modifier_value().is_some() {
+            "modifier"
+        } else {
+            "other"
+        };
         let mut modifiers = String::new();
         if event.modifiers.shift() {
             modifiers.push_str("SHIFT ");

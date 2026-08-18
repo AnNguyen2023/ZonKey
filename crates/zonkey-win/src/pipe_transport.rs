@@ -600,22 +600,25 @@ fn handle_recovery_command(
     match parts.next() {
         Some("LIST") => match store.list() {
             Ok(targets) => {
-                let mut text = format!("recovery-list|{}", targets.len());
-                for target in targets {
-                    let state = match target.state {
-                        None => "awaiting".to_owned(),
-                        Some((verdict, acknowledged)) => {
-                            format!("{verdict:?}|acked={acknowledged}")
-                        }
-                    };
-                    text.push('\u{1}');
-                    text.push_str(&target.uri);
-                    text.push('\u{1}');
-                    text.push_str(&target.expected.display());
-                    text.push('\u{1}');
-                    text.push_str(&state);
+                if targets.is_empty() {
+                    return "recovery-list|0".to_owned();
                 }
-                text
+                let mut awaiting = 0usize;
+                let mut resolved = 0usize;
+                for target in targets {
+                    if target.state.is_none() {
+                        awaiting += 1;
+                    } else {
+                        resolved += 1;
+                    }
+                }
+                // The operator can still use explicit RECONCILE/ACK input,
+                // but LIST never echoes URI, token text, session/request ids,
+                // or recovery hashes.
+                format!(
+                    "recovery-list|{}|awaiting={awaiting}|resolved={resolved}",
+                    awaiting + resolved
+                )
             }
             Err(error) => map_store_error(error),
         },
@@ -1675,7 +1678,9 @@ mod tests {
         let listed = client
             .recovery_command("LIST", Duration::from_secs(5))
             .expect("list");
-        assert!(listed.starts_with("recovery-list|1"), "list={listed}");
+        assert_eq!(listed, "recovery-list|1|awaiting=1|resolved=0");
+        assert!(!listed.contains("file:///doc"));
+        assert!(!listed.contains("resume"));
         assert_eq!(
             client.recovery_command("ACK|file:///doc|resume|0", Duration::from_secs(5)),
             Ok("recovery-error:AckBeforeReconcile".to_owned())

@@ -67,6 +67,7 @@ writeFileSync(
   "utf8",
 );
 const codeCli = locateCodeCli();
+const endpointTestsPath = join(extensionRoot, "out", "endpoint-profile-validation.cjs");
 
 try {
   // Package the production VSIX (idempotent; no dependency changes).
@@ -102,10 +103,15 @@ try {
   // "undefined" dev path).
   await runTests({
     extensionDevelopmentPath: dummyDevDir,
-    extensionTestsPath: join(extensionRoot, "out", "endpoint-profile-validation.cjs"),
+    extensionTestsPath: endpointTestsPath,
     extensionTestsEnv: {
       ZONKEY_ENDPOINT_DIR: discoveryDir,
       ZONKEY_CLI_RELEASE: cliRelease,
+      // The development environment may set this for VS Code's own Node
+      // helper processes. It must not reach the Electron test application,
+      // otherwise Code.exe runs as plain Node and treats the workspace path
+      // as the test module (`MODULE_NOT_FOUND`).
+      ELECTRON_RUN_AS_NODE: undefined,
     },
     launchArgs: [
       workspaceDir,

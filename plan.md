@@ -957,8 +957,8 @@ rather than wrapping or reusing identity.
   protocol compatibility (`zonkey.host-transport/1`, recovery-state v2);
   `*.vsix` gitignored; dependencies/lockfile untouched.
 - Startup model (explicit, manual): `zonkey-cli serve-host-validation
-  --pipe auto` generates the per-lifecycle nonce pipe (M3D-29), prints
-  `endpoint_pipe=…`, and writes `%LOCALAPPDATA%\ZonKey\endpoint.txt`
+  --pipe auto` generates the per-lifecycle nonce pipe (M3D-29), prints only
+  a sanitized readiness/protocol line, and writes `%LOCALAPPDATA%\ZonKey\endpoint.txt`
   (protocol/pipe/pid/started; current-user-only ACL via durable replace).
   Clean shutdown removes the record only when it still names this
   endpoint; crashes leave stale records that fail closed on connect
@@ -977,6 +977,21 @@ rather than wrapping or reusing identity.
 - Gates: Rust fmt/clippy/239 tests/release+msvc builds; npm 43/43 +
   typecheck; real `M3D28_RECOVERY_VALIDATION_OK` regression;
   `M3D33_ENDPOINT_PROFILE_OK` + `M3D33_CLEAN_PROFILE_OK`. See ADR 0038.
+
+#### M3D-35 - Clean-profile harness + diagnostics/privacy hardening - IN PROGRESS
+
+ - The clean-profile `MODULE_NOT_FOUND` root cause is the inherited
+   `ELECTRON_RUN_AS_NODE=1` environment; the harness now clears it for the
+   Electron test application and waits for a discovery record owned by the
+   spawned endpoint PID.
+ - Production-default diagnostics emit no raw key/document content, pipe or
+   session identities, URI/path values, or raw OS connection errors.
+   Recovery LIST is aggregate-only; explicit `--show-token` remains the
+   already-approved development opt-in from ADR 0008.
+ - `npm run package` is checked against an exact five-entry VSIX allow-list;
+   clean-profile activation/discovery/recovery/restart/stale-session checks
+   pass with CompositionUnknown and unchanged document text/version. See ADR
+   0040.
 
 #### M3C-02 - Restore-plan lifecycle and validation - DONE
 

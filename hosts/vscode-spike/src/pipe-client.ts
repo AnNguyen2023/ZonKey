@@ -14,7 +14,7 @@ export const TRANSPORT_PROTOCOL_ID = "zonkey.host-transport/1";
 export const MAX_FRAME_BYTES = 64 * 1024;
 
 export type PipeClientError =
-  | { kind: "ConnectTimeout"; detail?: string }
+  | { kind: "ConnectTimeout" }
   | { kind: "ProtocolMismatch" }
   | { kind: "SessionMismatch" }
   | { kind: "Timeout" }
@@ -96,13 +96,12 @@ export class NamedPipeClient {
         clearTimeout(timer);
         resolve(socket);
       });
-      socket.once("error", (error: Error) => {
+      socket.once("error", () => {
         clearTimeout(timer);
         socket.destroy();
-        reject({
-          kind: "ConnectTimeout",
-          detail: `${error?.name ?? "Error"}: ${error?.message ?? String(error)}`,
-        } as PipeClientError);
+        // OS error text can contain pipe/path details. The typed reason is
+        // sufficient for the caller and keeps production diagnostics safe.
+        reject({ kind: "ConnectTimeout" } as PipeClientError);
       });
     });
     const client = new NamedPipeClient(socket, "");

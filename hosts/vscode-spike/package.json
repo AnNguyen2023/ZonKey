@@ -51,7 +51,8 @@
     "smoke:m3d23-tooling": "npm run compile:handoff-live && node scripts/run-m3d23-smoke.mjs --scripted-tooling-check",
     "test:handoff-live": "npm run compile:handoff-live && node scripts/run-handoff-live-integration.mjs",
     "compile:prod": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --minify --outfile=out/extension.cjs",
-    "package": "npm run compile:prod && vsce package --no-dependencies",
+    "package": "npm run compile:prod && npx --yes @vscode/vsce package --no-dependencies && npm run check:vsix",
+    "check:vsix": "node scripts/check-vsix.mjs",
     "test:endpoint": "npm run compile:endpoint && node scripts/run-clean-profile.mjs",
     "compile:endpoint": "esbuild integration/real-vscode-endpoint.entry.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/endpoint-profile-validation.cjs"
   },

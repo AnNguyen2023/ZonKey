@@ -104,7 +104,9 @@ async function runInner(): Promise<void> {
   );
   const listed = await client.recoveryCommand("LIST", 10_000);
   assert.ok(listed.startsWith("recovery-list|1"), `list=${listed}`);
-  assert.ok(listed.includes(SENTINEL), "listed target carries the real token");
+  assert.equal(listed, "recovery-list|1|awaiting=1|resolved=0");
+  assert.ok(!listed.includes(SENTINEL), "LIST must not expose the real token");
+  assert.ok(!listed.includes(uri), "LIST must not expose the document URI");
   // Ack before reconciliation is rejected.
   assert.equal(
     await client.recoveryCommand(`ACK|${uri}|${SENTINEL}|0`, 10_000),

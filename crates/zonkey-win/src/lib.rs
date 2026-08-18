@@ -271,9 +271,7 @@ pub fn run_serve_host_validation(
         ))),
     )
     .map_err(|error| format!("pipe listener failed: {error:?}"))?;
-    println!(
-        "zonkey host-validation endpoint ready pipe={pipe_name} protocol=zonkey.host-transport/1"
-    );
+    println!("zonkey host-validation endpoint ready protocol=zonkey.host-transport/1");
     if let Some(seconds) = max_seconds {
         std::thread::sleep(std::time::Duration::from_secs(seconds));
     } else {
@@ -317,7 +315,13 @@ fn resolve_endpoint_pipe(requested: &str) -> Result<(String, bool), String> {
     if !endpoint_discovery::write_record(&record) {
         return Err("endpoint discovery record could not be written".to_owned());
     }
-    println!("endpoint_pipe={generated}");
+    // The pipe identity is delivered through the current-user discovery
+    // record; stdout stays sanitized and never exposes the nonce-bearing
+    // pipe name.
+    println!(
+        "endpoint_ready=true protocol={}",
+        endpoint_discovery::ENDPOINT_PROTOCOL
+    );
     Ok((generated, true))
 }
 
@@ -350,9 +354,7 @@ pub fn run_handoff_live(pipe_name: &str) -> Result<(), String> {
         ))),
     )
     .map_err(|error| format!("pipe listener failed: {error:?}"))?;
-    println!(
-        "live handoff endpoint ready pipe={pipe_name} protocol=zonkey.host-transport/1 (Ctrl+C to stop)"
-    );
+    println!("live handoff endpoint ready protocol=zonkey.host-transport/1 (Ctrl+C to stop)");
     let processor = zonkey_service::transport::SharedDecisionProcessor::new(state);
     let observe = native::run_observe_with_processor(processor);
     server.shutdown();

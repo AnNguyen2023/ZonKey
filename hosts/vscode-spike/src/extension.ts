@@ -14,6 +14,7 @@ import { VsCodeHostAdapter, requestFromSnapshot } from "./adapter.ts";
 import { createRealBinding } from "./vscode-binding.ts";
 import {
   connectDiscoveredEndpoint,
+  describeEndpointState,
   type EndpointState,
 } from "./endpoint.ts";
 import type { NamedPipeClient } from "./pipe-client.ts";
@@ -24,19 +25,6 @@ const REPLACEMENT = "zonkey-spike-applied";
 export const endpointState: { client?: NamedPipeClient; last: EndpointState } = {
   last: { status: "no-record" },
 };
-
-function describe(state: EndpointState): string {
-  switch (state.status) {
-    case "connected":
-      return `connected (pipe ${state.pipe}, session ${state.session})`;
-    case "connect-failed":
-      return `endpoint record found but connect failed (${state.pipe})`;
-    case "no-record":
-      return "no endpoint discovery record";
-    case "disabled":
-      return "disabled";
-  }
-}
 
 async function connect(): Promise<void> {
   const { state, client } = await connectDiscoveredEndpoint(3000);
@@ -86,7 +74,7 @@ export function activate(context: vscode.ExtensionContext): { endpointState: typ
 
   const status = vscode.commands.registerCommand("zonkeySpike.endpointStatus", () => {
     void vscode.window
-      .showInformationMessage(`Zonkey endpoint: ${describe(endpointState.last)}`)
+      .showInformationMessage(`Zonkey endpoint: ${describeEndpointState(endpointState.last)}`)
       .then();
   });
 
@@ -95,7 +83,7 @@ export function activate(context: vscode.ExtensionContext): { endpointState: typ
     async () => {
       await connect();
       void vscode.window.showInformationMessage(
-        `Zonkey endpoint: ${describe(endpointState.last)}`,
+        `Zonkey endpoint: ${describeEndpointState(endpointState.last)}`,
       );
     },
   );
