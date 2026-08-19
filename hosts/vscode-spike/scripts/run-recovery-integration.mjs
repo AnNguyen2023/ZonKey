@@ -39,12 +39,27 @@ try {
     throw new Error(`validation endpoint never became ready: ${serverOutput}`);
   }
   console.log(`m3d28_endpoint_ready pipe=${pipeName}`);
-  await runTests({
-    extensionDevelopmentPath: extensionRoot,
-    extensionTestsPath: join(extensionRoot, "out", "recovery-validation.cjs"),
-    launchArgs: [workspaceDir, "--disable-workspace-trust"],
-    extensionTestsEnv: { ZONKEY_M3D28_PIPE: pipeName },
-  });
+  const callerElectronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+  try {
+    // Keep the helper-process flag out of Code.exe, which would otherwise
+    // treat the workspace directory as a Node test module.
+    delete process.env.ELECTRON_RUN_AS_NODE;
+    await runTests({
+      extensionDevelopmentPath: extensionRoot,
+      extensionTestsPath: join(extensionRoot, "out", "recovery-validation.cjs"),
+      launchArgs: [workspaceDir, "--disable-workspace-trust"],
+      extensionTestsEnv: {
+        ZONKEY_M3D28_PIPE: pipeName,
+        ELECTRON_RUN_AS_NODE: undefined,
+      },
+    });
+  } finally {
+    if (callerElectronRunAsNode === undefined) {
+      delete process.env.ELECTRON_RUN_AS_NODE;
+    } else {
+      process.env.ELECTRON_RUN_AS_NODE = callerElectronRunAsNode;
+    }
+  }
   console.log("M3D28_RECOVERY_VALIDATION_OK");
 } finally {
   server.kill();
