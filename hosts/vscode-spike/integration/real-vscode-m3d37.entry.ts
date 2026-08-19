@@ -8,10 +8,22 @@
  * client and never feeds scripted keyboard input.
  */
 import assert from "node:assert/strict";
+import { appendFileSync } from "node:fs";
 import * as vscode from "vscode";
 import { parseHandoffPayload } from "../src/handoff.ts";
 
 const EXTENSION_ID = "zonkey-spike.zonkey-vscode-spike";
+const transcriptPath = process.env.ZONKEY_PILOT_TRANSCRIPT;
+
+function pilotMarker(stage: string, details = ""): void {
+  if (transcriptPath === undefined) return;
+  const suffix = details.length === 0 ? "" : ` ${details}`;
+  appendFileSync(
+    transcriptPath,
+    `${new Date().toISOString()} stage=${stage}${suffix}\n`,
+    "utf8",
+  );
+}
 
 interface ExtensionApi {
   endpointState: {
@@ -49,16 +61,16 @@ function handoffFixture(payload: string): { renderedToken: string } {
 function failureKind(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("live RestorePlanHandoff") || message.includes("timeout waiting")) {
-    return "HANDOFF_TIMEOUT";
+    return "LIVE_HANDOFF_TIMEOUT";
   }
   if (message.includes("packaged command") || message.includes("not registered")) {
-    return "PACKAGED_COMMAND_UNAVAILABLE";
+    return "PACKAGED_COMMAND";
   }
   if (message.includes("document text") || message.includes("document version")) {
     return "DOCUMENT_CHANGED";
   }
-  if (message.includes("unexpected packaged command result")) return "UNEXPECTED_RESULT";
-  return "RUNNER_FAILURE";
+  if (message.includes("unexpected packaged command result")) return "PACKAGED_COMMAND";
+  return "OTHER_TYPED_FAILURE";
 }
 
 async function runInner(): Promise<void> {
@@ -71,6 +83,7 @@ async function runInner(): Promise<void> {
     commands.includes("zonkeySpike.checkCurrentHandoff"),
     "packaged command is not registered",
   );
+  pilotMarker("PILOT_VSCODE_READY");
 
   const folders = vscode.workspace.workspaceFolders;
   assert.ok(folders !== undefined && folders.length === 1, "one smoke workspace is required");
@@ -99,6 +112,7 @@ async function runInner(): Promise<void> {
       if (parsed.kind === "none") {
         if (!noCurrentHandoffObserved) {
           noCurrentHandoffObserved = true;
+          pilotMarker("PILOT_NO_CURRENT_HANDOFF_OK");
           console.log("M3D37 NO_CURRENT_HANDOFF_OBSERVED");
         }
         return undefined;
@@ -111,6 +125,7 @@ async function runInner(): Promise<void> {
   );
   assert.ok(noCurrentHandoffObserved, "negative/no-current handoff state was not observed");
   terminal.dispose();
+  pilotMarker("PILOT_LIVE_HANDOFF_OBSERVED");
   console.log("M3D37 LIVE_HANDOFF_OBSERVED");
 
   // Build a real local-file host fixture from the currently observed live
@@ -134,6 +149,8 @@ async function runInner(): Promise<void> {
   assert.equal(result, "Rejected(CompositionUnknown)", "unexpected packaged command result");
   assert.equal(targetDocument.getText(), beforeText, "document text changed");
   assert.equal(targetDocument.version, beforeVersion, "document version changed");
+  pilotMarker("PILOT_PACKAGED_COMMAND_OK");
+  pilotMarker("PILOT_DOCUMENT_UNCHANGED_OK", "document_unchanged=true");
   console.log("M3D37_PACKAGED_COMMAND_OK");
   console.log("M3D37_DOCUMENT_UNCHANGED_OK");
   vscode.window.showInformationMessage("ZonKey M3D-37 physical smoke passed");
@@ -143,6 +160,8 @@ export async function run(): Promise<void> {
   try {
     await runInner();
   } catch (error) {
+    pilotMarker(`PILOT_SMOKE_FAIL:${failureKind(error)}`);
+    pilotMarker("exit_code=1 document_unchanged=unknown");
     console.error(`M3D37_FAILURE kind=${failureKind(error)}`);
     throw error;
   }

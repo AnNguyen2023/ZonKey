@@ -13,6 +13,7 @@ import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
+  appendFileSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -33,6 +34,28 @@ const vsixPath =
   join(extensionRoot, "zonkey-vscode-spike-0.0.1.vsix");
 const entryPath = join(extensionRoot, "out", "m3d37-physical-smoke.cjs");
 const waitSeconds = Number(process.env.ZONKEY_M3D37_WAIT_SECONDS ?? "300");
+const transcriptPath = process.env.ZONKEY_PILOT_TRANSCRIPT;
+
+function pilotMarker(stage, details = "") {
+  if (transcriptPath === undefined) return;
+  const suffix = details.length === 0 ? "" : ` ${details}`;
+  appendFileSync(
+    transcriptPath,
+    `${new Date().toISOString()} stage=${stage}${suffix}\n`,
+    "utf8",
+  );
+}
+
+function pilotFailureRecorded() {
+  if (transcriptPath === undefined || !existsSync(transcriptPath)) return false;
+  return readFileSync(transcriptPath, "utf8").includes("stage=PILOT_SMOKE_FAIL:");
+}
+
+function recordedFailureStage() {
+  if (transcriptPath === undefined || !existsSync(transcriptPath)) return undefined;
+  const match = readFileSync(transcriptPath, "utf8").match(/stage=PILOT_SMOKE_FAIL:([A-Z_]+)/);
+  return match?.[1];
+}
 
 if (!existsSync(cliPath)) {
   throw new Error(
@@ -107,15 +130,15 @@ let failed = false;
 function failureKind(error) {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("live endpoint discovery")) return "ENDPOINT_STARTUP";
-  if (message.includes("live RestorePlanHandoff")) return "HANDOFF_TIMEOUT";
+  if (message.includes("live RestorePlanHandoff")) return "LIVE_HANDOFF_TIMEOUT";
   if (message.includes("packaged command") || message.includes("not registered")) {
-    return "PACKAGED_COMMAND_UNAVAILABLE";
+    return "PACKAGED_COMMAND";
   }
   if (message.includes("document text") || message.includes("document version")) {
     return "DOCUMENT_CHANGED";
   }
-  if (message.includes("unexpected packaged command result")) return "UNEXPECTED_RESULT";
-  return "RUNNER_FAILURE";
+  if (message.includes("unexpected packaged command result")) return "PACKAGED_COMMAND";
+  return "OTHER_TYPED_FAILURE";
 }
 async function stopEndpoint() {
   if (endpoint === undefined) return;
@@ -147,6 +170,7 @@ try {
     20_000,
     "live endpoint discovery",
   );
+  pilotMarker("PILOT_ENDPOINT_STARTED");
   console.log("M3D37 ONE_WINDOW_READY");
   console.log("M3D37 OWNER: type dungf + Space, then resume + Space, then stop typing");
 
@@ -156,6 +180,7 @@ try {
     extensionTestsEnv: {
       ZONKEY_ENDPOINT_DIR: discoveryDir,
       ZONKEY_M3D37_WAIT_SECONDS: String(waitSeconds),
+      ZONKEY_PILOT_TRANSCRIPT: transcriptPath,
       ELECTRON_RUN_AS_NODE: undefined,
     },
     launchArgs: [
@@ -165,11 +190,20 @@ try {
       `--extensions-dir=${extensionsDir}`,
     ],
   });
+  pilotMarker("PILOT_SMOKE_OK");
+  pilotMarker("exit_code=0 document_unchanged=true");
   console.log("M3D37_ONE_WINDOW_SMOKE_OK");
 } catch (error) {
   failed = true;
+  const stage = recordedFailureStage() ?? failureKind(error);
+  if (!pilotFailureRecorded()) {
+    pilotMarker(`PILOT_SMOKE_FAIL:${stage}`);
+    pilotMarker("exit_code=1 document_unchanged=unknown");
+  }
+  console.error(`PILOT_SMOKE_FAIL:${stage}`);
   console.error(`M3D37_FAILURE kind=${failureKind(error)}`);
 } finally {
+  pilotMarker("PILOT_TRANSCRIPT_FLUSHED_BEFORE_CLEANUP");
   await stopEndpoint();
   if (process.env.ZONKEY_KEEP_PROFILE !== "1") {
     rmSync(profileDir, { recursive: true, force: true });
