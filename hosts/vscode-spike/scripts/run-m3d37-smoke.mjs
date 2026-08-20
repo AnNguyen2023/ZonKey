@@ -8,7 +8,7 @@
  * this path. The test entry invokes the packaged command automatically and
  * cleans all temporary state on exit.
  */
-import { runTests } from "@vscode/test-electron";
+import { runTests, downloadAndUnzipVSCode } from "@vscode/test-electron";
 import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
@@ -73,7 +73,40 @@ function locateCodeCli() {
     const cli = join(base, candidate, "bin", "code.cmd");
     if (existsSync(cli)) return cli;
   }
-  throw new Error("VS Code CLI not found; run an existing test:* command once first");
+  return undefined;
+}
+
+/**
+ * TB-001: the runner must be self-contained on a clean machine. If no
+ * `.vscode-test` VS Code archive exists, download it through the same
+ * `@vscode/test-electron` channel the `test:*` commands use — pinned to
+ * the version the beta was validated on and explicitly cached under the
+ * extension root (the library default is the caller's CWD) — then locate
+ * the CLI again. Failures carry the typed bootstrap message so the pilot
+ * classification is `BOOTSTRAP_VSCODE_DOWNLOAD`, never
+ * `OTHER_TYPED_FAILURE`.
+ */
+async function ensureCodeCli() {
+  const cached = locateCodeCli();
+  if (cached !== undefined) return cached;
+  console.log("M3D37 BOOTSTRAP: downloading VS Code test Electron (one-time)...");
+  try {
+    await downloadAndUnzipVSCode({
+      version: "1.133.0",
+      platform: "win32-x64-archive",
+      cachePath: join(extensionRoot, ".vscode-test"),
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`VS Code test Electron bootstrap failed: ${detail}`);
+  }
+  const downloaded = locateCodeCli();
+  if (downloaded === undefined) {
+    throw new Error(
+      "VS Code test Electron bootstrap failed: archive downloaded but code.cmd was not found",
+    );
+  }
+  return downloaded;
 }
 
 function readDiscovery(dir) {
@@ -127,8 +160,16 @@ writeFileSync(
 let endpoint;
 let failed = false;
 
+async function main() {
+
 function failureKind(error) {
   const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("VS Code test Electron bootstrap")) {
+    return "BOOTSTRAP_VSCODE_DOWNLOAD";
+  }
+  if (message.includes("install the packaged VSIX") || message.includes("VSIX install")) {
+    return "BOOTSTRAP_VSIX_INSTALL";
+  }
   if (message.includes("live endpoint discovery")) return "ENDPOINT_STARTUP";
   if (message.includes("live RestorePlanHandoff")) return "LIVE_HANDOFF_TIMEOUT";
   if (message.includes("packaged command") || message.includes("not registered")) {
@@ -150,12 +191,26 @@ async function stopEndpoint() {
 }
 
 try {
-  const codeCli = locateCodeCli();
-  execFileSync(
-    "cmd",
-    ["/c", codeCli, `--user-data-dir=${profileDir}`, `--extensions-dir=${extensionsDir}`, "--install-extension", vsixPath, "--force"],
-    { stdio: "inherit" },
-  );
+  const codeCli = await ensureCodeCli();
+  // Clean-machine bootstrap verification mode: prove the runner is
+  // self-contained (cache present or downloaded) without launching the
+  // physical smoke.
+  if (process.env.ZONKEY_M3D37_BOOTSTRAP_ONLY === "1") {
+    pilotMarker("PILOT_BOOTSTRAP_OK");
+    console.log("M3D37_BOOTSTRAP_OK");
+    process.exitCode = 0;
+    return;
+  }
+  try {
+    execFileSync(
+      "cmd",
+      ["/c", codeCli, `--user-data-dir=${profileDir}`, `--extensions-dir=${extensionsDir}`, "--install-extension", vsixPath, "--force"],
+      { stdio: "inherit" },
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`VSIX install failed: ${detail}`);
+  }
 
   const child = spawn(cliPath, ["handoff-live", "--pipe", "auto"], {
     env: { ...process.env, ZONKEY_ENDPOINT_DIR: discoveryDir },
@@ -216,3 +271,6 @@ try {
   }
 }
 if (failed) process.exitCode = 1;
+}
+
+await main();
