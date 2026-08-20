@@ -73,3 +73,26 @@ evidence=owner reported failure; the visible PowerShell runner had no sanitized 
 root_cause_hypothesis=evidence-capture gap; runtime failure stage is not established
 next_action=rerun smoke only with sanitized marker capture; do not run reconnect/restart/recovery
 ```
+
+## Machine #2 cross-machine pilot — 2026-08-20 (M3D-41)
+
+```text
+machine=SECOND_INTERNAL_TEST_MACHINE (sanitized)
+windows=Windows 11 x64 class; PowerShell execution policy PASS; Node/npm PASS
+package_checksum_gate=PASS
+prior_failures=BETA_TEST_TOOLING_DEPENDENCY (bootstrap-order: missing .vscode-test VS Code archive; path correction applied by owner)
+run_beta_smoke=PASS (owner physical keyboard only)
+markers=M3D37_NO_CURRENT_HANDOFF_OBSERVED, M3D37_LIVE_HANDOFF_OBSERVED, M3D37_PACKAGED_COMMAND_OK, M3D37_DOCUMENT_UNCHANGED_OK, M3D37_ONE_WINDOW_SMOKE_OK, PILOT_SMOKE_OK, ZONKEY_BETA_SMOKE_OK
+exit_code=0
+document_unchanged=true
+result_enum=Rejected(CompositionUnknown)
+applied_or_mutation=NONE
+conclusion=prior machine #2 failures were tooling/bootstrap/setup dependencies, not runtime defects
+m3d41_verdict=MULTI_MACHINE_BETA_HEALTHY
+```
+
+Runtime, beta package, and checksums were unchanged throughout. TB-001
+(self-contained clean-machine runner bootstrap + typed bootstrap failure
+markers + `ZONKEY_M3D37_BOOTSTRAP_ONLY` verification mode) is implemented
+in `hosts/vscode-spike/scripts/run-m3d37-smoke.mjs` after this evidence
+was recorded.
