@@ -41,3 +41,14 @@ directly with `--extensionDevelopmentPath` dummy + `--extensionTestsPath`
 kit would therefore be: PowerShell scripts + release CLI + VSIX + VS Code
 portable archive + prebuilt smoke entry — no Node/Rust/source. Not
 scheduled until the owner approves a TB-002 milestone.
+
+## TB-002 CLOSED — 2026-08-21
+
+Verdict **STANDALONE_KIT_READY**. Machine #2 passed the real physical
+one-command smoke from the kit outside any source repo (markers through
+PILOT_SMOKE_OK / ZONKEY_BETA_SMOKE_OK, Rejected(CompositionUnknown),
+document unchanged, no Applied/mutation). Tester machine requires no
+Node/npm/Rust/source tree; offline after copy; VS Code pinned 1.133.0;
+Git absence is non-blocking (manifest + checksums carry provenance).
+Canonical: scripts/beta-kit/run-beta-smoke.ps1 + scripts/package-beta-kit.mjs.
+See ADR 0042.
