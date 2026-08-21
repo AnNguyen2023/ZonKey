@@ -52,3 +52,22 @@ Node/npm/Rust/source tree; offline after copy; VS Code pinned 1.133.0;
 Git absence is non-blocking (manifest + checksums carry provenance).
 Canonical: scripts/beta-kit/run-beta-smoke.ps1 + scripts/package-beta-kit.mjs.
 See ADR 0042.
+## TB-003 — Transactional release packaging — CLOSED 2026-08-21
+
+`scripts/package-beta-kit.mjs` is now transactional: build/download into a
+unique staging directory; verify everything there (pinned VS Code 1.133.0
+zip, all artifacts, manifest, SHA256SUMS, checksum re-verification);
+publish only after full verification (old kit renamed aside, deleted only
+after the new kit is in place, mid-publish failure rolls back). Failures
+exit typed — `PACKAGING_DOWNLOAD` (network/DNS surfaced verbatim),
+`PACKAGING_VERIFY`, `PACKAGING_PUBLISH` — and never touch the previous
+known-good kit. Proven by injection: bogus URL → PACKAGING_DOWNLOAD;
+missing artifact → PACKAGING_VERIFY; exclusive file handle inside the kit
+directory → PACKAGING_PUBLISH (EPERM) — in all three the prior kit stayed
+byte-for-byte identical and staging/retired directories were cleaned.
+Successful rebuilds publish and pass 7/7 checksums. Manifest semantic made
+explicit: `git_worktree_clean` renamed to `git_tracked_changes_clean`
+(tracked-changes-only; untracked local files never affect kit provenance;
+the source commit is recorded separately; the kit runner never read the
+old field, so no compatibility break). Test hook `ZONKEY_KIT_VSCODE_URL`
+exists for failure injection only.
