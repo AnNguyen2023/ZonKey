@@ -53,7 +53,7 @@ function sha256(path) {
 }
 
 const gitCommit = git(["rev-parse", "HEAD"]);
-const gitClean = git(["status", "--porcelain"]) === "";
+const gitClean = git(["status", "--porcelain", "-uno"]) === "";
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
